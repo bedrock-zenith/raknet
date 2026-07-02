@@ -1,7 +1,7 @@
 const Cursor = @import("../common/cursor.zig");
 const std = @import("std");
 const Magic = @import("../types/magic.zig").Magic;
-const ZeroPedding = @import("../types/zero-pedding.zig");
+const ZeroPedding = @import("../types/zero-padding.zig");
 
 pub fn serialize(comptime P: type, cursor: *Cursor, packet: P) !void {
     const type_info = @typeInfo(P);

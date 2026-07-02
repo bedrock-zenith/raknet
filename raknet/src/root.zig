@@ -9,6 +9,7 @@ pub const UnconnectedPongPacket = @import("./packets/unconnected-pong.zig");
 pub const UnconnectedPingPacket = @import("./packets/unconnected-ping.zig");
 pub const OpenConnectionRequestOne = @import("./packets/open-connection-request-one.zig");
 pub const RakAddress = @import("./types/address.zig");
+pub const Listener = @import("./core/listener.zig");
 
 // -------- Constants --------
 test {
