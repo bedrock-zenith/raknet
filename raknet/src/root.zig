@@ -1,18 +1,15 @@
-//! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
+pub const Cursor = @import("./common/cursor.zig");
+pub const PacketId = @import("./packets/packet-id.zig").PacketId;
+pub const common = @import("./packets/common.zig");
+pub const serialize = common.serialize;
+pub const deserialize = common.deserialize;
+pub const Magic = common.Magic;
+pub const UnconnectedPongPacket = @import("./packets/unconnected-pong.zig");
+pub const UnconnectedPingPacket = @import("./packets/unconnected-ping.zig");
+pub const RakAddress = @import("./types/address.zig");
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
-
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+// -------- Constants --------
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(@This());
 }
