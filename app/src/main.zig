@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     const socket = try listenAddress.bind(io, .{ .mode = .dgram });
     var buffer: [2048]u8 = undefined;
 
-    var send_buffer: [2000]u8 = undefined;
+    var send_buffer: [2048]u8 = undefined;
     var send_cursor: raknet.Cursor = .init(&send_buffer, 0);
 
     std.log.info("Server started", .{});
