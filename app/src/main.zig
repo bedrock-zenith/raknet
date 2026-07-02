@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const socket = try listenAddress.bind(io, .{ .mode = .dgram });
-    var buffer: [2048]u8 = undefined;
+    var receive_buffer: [2048]u8 = undefined;
 
     var send_buffer: [2048]u8 = undefined;
     var send_cursor: raknet.Cursor = .init(&send_buffer, 0);
@@ -22,24 +22,30 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Server started", .{});
 
     while (true) {
-        var message = socket.receive(io, &buffer) catch |err| switch (err) {
+        var message = socket.receive(io, &receive_buffer) catch |err| switch (err) {
             else => return err,
         };
 
-        var read_cursor: raknet.Cursor = .init(message.data, 1);
-        var ping_packet: raknet.UnconnectedPingPacket = undefined;
-        try raknet.deserialize(raknet.UnconnectedPingPacket, &read_cursor, &ping_packet);
-        std.log.info("ping_time: {d}", .{ping_packet.ping_time});
+        var read_cursor: raknet.Cursor = .init(message.data, 0);
 
-        try raknet.serialize(raknet.UnconnectedPongPacket, &send_cursor, .{
-            .ping_time = ping_packet.ping_time,
-            .server_guid = guid,
-            .motd = motd,
-        });
+        const packet_id: raknet.PacketId = @enumFromInt(try read_cursor.readByte());
+        switch (packet_id) {
+            .UnconnectedPing => {
+                send_cursor.reset();
+                var ping_packet: raknet.UnconnectedPingPacket = undefined;
+                try raknet.deserialize(raknet.UnconnectedPingPacket, &read_cursor, &ping_packet);
+                std.log.info("ping_time: {d}", .{ping_packet.ping_time});
 
-        try socket.send(io, &message.from, send_buffer[0..send_cursor.cursor]);
-        // std.log.debug("DataSize: {s}", .{message.data});
-
-        send_cursor.reset();
+                try raknet.serialize(raknet.UnconnectedPongPacket, &send_cursor, .{
+                    .ping_time = ping_packet.ping_time,
+                    .server_guid = guid,
+                    .motd = motd,
+                });
+                try socket.send(io, &message.from, send_buffer[0..send_cursor.cursor]);
+            },
+            else => {
+                std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), message.data.len, message.data[0] });
+            },
+        }
     }
 }
