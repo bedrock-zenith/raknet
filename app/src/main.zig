@@ -1,4 +1,5 @@
 const raknet = @import("raknet");
+const Listener = raknet.Listener;
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
@@ -14,6 +15,14 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const socket = try listenAddress.bind(io, .{ .mode = .dgram });
+    var listener: Listener = try .init(
+        init.io,
+        init.gpa,
+        socket,
+    );
+    listener.onConnected.register(null, invokeTest);
+    _ = listener.onConnected.invoke(.{});
+
     var receive_buffer: [2048]u8 = undefined;
 
     var send_buffer: [2048]u8 = undefined;
@@ -48,4 +57,7 @@ pub fn main(init: std.process.Init) !void {
             },
         }
     }
+}
+pub fn invokeTest(_: ?*anyopaque, _: Listener.ServerConnection) void {
+    std.log.debug("Callback test", .{});
 }

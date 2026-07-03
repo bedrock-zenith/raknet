@@ -105,6 +105,6 @@ test "test" {
     var read_cursor: Cursor = .init(&buffer, 0);
 
     const testin_value: u16 = 564;
-    write_cursor.writeInt(u16, testin_value, .big);
-    try std.testing.expectEqual(testin_value, read_cursor.readInt(u16, .big));
+    try write_cursor.writeInt(u16, testin_value, .big);
+    try std.testing.expectEqual(testin_value, try read_cursor.readInt(u16, .big));
 }

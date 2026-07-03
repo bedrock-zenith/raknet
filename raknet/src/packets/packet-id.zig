@@ -1,5 +1,8 @@
 // -------- Enums --------
 pub const PacketId = enum(u8) {
+    pub fn from(num: u8) PacketId {
+        return @enumFromInt(num);
+    }
     UnconnectedPing = 0x01,
     UnconnectedPingOpenConnections = 0x02,
     UnconnectedPong = 0x1c,
