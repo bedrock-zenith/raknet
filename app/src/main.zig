@@ -6,58 +6,28 @@ const net = Io.net;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const guid: u64 = 13253860892328930865;
-    const motd = try std.fmt.allocPrint(init.gpa, "MCPE;Dedicated Server;527;1.19.1;0;10;{d};Bedrock level;Survival;1;", .{guid});
+    const bind_address: net.IpAddress = .{ .ip4 = try .parse("0.0.0.0", 19132) };
+    const socket = try bind_address.bind(io, .{ .mode = .dgram });
+
+    var listener: Listener = try .init(init.io, init.gpa);
+
+    const motd = try std.fmt.allocPrint(init.gpa, "MCPE;Dedicated Server;527;1.19.1;0;10;{d};Bedrock level;Survival;1;", .{listener.guid});
     defer init.gpa.free(motd);
 
-    const listenAddress: net.IpAddress = .{
-        .ip4 = try .parse("0.0.0.0", 19132),
-    };
+    listener.motd = motd;
 
-    const socket = try listenAddress.bind(io, .{ .mode = .dgram });
-    var listener: Listener = try .init(
-        init.io,
-        init.gpa,
-        socket,
-    );
-    listener.onConnected.register(null, invokeTest);
-    _ = listener.onConnected.invoke(.{});
+    std.log.info("Server started with port: {d}", .{bind_address.getPort()});
 
     var receive_buffer: [2048]u8 = undefined;
-
-    var send_buffer: [2048]u8 = undefined;
-    var send_cursor: raknet.Cursor = .init(&send_buffer, 0);
-
-    std.log.info("Server started", .{});
-
     while (true) {
-        var message = socket.receive(io, &receive_buffer) catch |err| switch (err) {
+        const message = socket.receive(io, &receive_buffer) catch |err| switch (err) {
             else => return err,
         };
 
-        var read_cursor: raknet.Cursor = .init(message.data, 0);
-
-        const packet_id: raknet.PacketId = @enumFromInt(try read_cursor.readByte());
-        switch (packet_id) {
-            .UnconnectedPing => {
-                send_cursor.reset();
-                var ping_packet: raknet.UnconnectedPingPacket = undefined;
-                try raknet.deserialize(raknet.UnconnectedPingPacket, &read_cursor, &ping_packet);
-                std.log.info("ping_time: {d}", .{ping_packet.ping_time});
-
-                try raknet.serialize(raknet.UnconnectedPongPacket, &send_cursor, .{
-                    .ping_time = ping_packet.ping_time,
-                    .server_guid = guid,
-                    .motd = motd,
-                });
-                try socket.send(io, &message.from, send_buffer[0..send_cursor.cursor]);
-            },
-            else => {
-                std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), message.data.len, message.data[0] });
-            },
-        }
+        const endpoint: raknet.Endpoint = .{
+            .address = message.from,
+            .source = &socket,
+        };
+        try listener.receive(message.data, &endpoint);
     }
-}
-pub fn invokeTest(_: ?*anyopaque, _: Listener.ServerConnection) void {
-    std.log.debug("Callback test", .{});
 }
