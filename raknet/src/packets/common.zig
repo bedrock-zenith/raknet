@@ -1,9 +1,9 @@
-const Cursors = @import("../common/cursor.zig");
+const Cursor = @import("../common/cursor.zig");
 const std = @import("std");
 const Magic = @import("../types/magic.zig").Magic;
 const ZeroPadding = @import("../types/zero-padding.zig");
 
-pub fn serialize(comptime P: type, cursor: *Cursors.Writer, packet: *const P) !void {
+pub fn serialize(comptime P: type, cursor: *Cursor.Writer, packet: *const P) !void {
     const type_info = @typeInfo(P);
 
     try cursor.writeByte(@intFromEnum(P.PacketId));
@@ -27,7 +27,7 @@ pub fn serialize(comptime P: type, cursor: *Cursors.Writer, packet: *const P) !v
     }
 }
 
-pub fn deserialize(comptime P: type, cursor: *Cursors.Reader, packet: *P) !void {
+pub fn deserialize(comptime P: type, cursor: *Cursor.Reader, packet: *P) !void {
     const type_info = @typeInfo(P);
     inline for (type_info.@"struct".fields) |field| {
         switch (field.type) {
