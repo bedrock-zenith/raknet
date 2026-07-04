@@ -4,6 +4,8 @@ const Dispatcher = @import("../common/dispatcher.zig").Dispatcher;
 const Reader = @import("../common/cursor.zig").Reader;
 const Writer = @import("../common/cursor.zig").Writer;
 const PacketId = @import("../packets/packet-id.zig").PacketId;
+const MAX_MTU_SIZE = @import("./well-known.zig").MAX_MTU_SIZE;
+const UDP_HEADER_SIZE = @import("./well-known.zig").UDP_HEADER_SIZE;
 
 const Listener = @This();
 
@@ -11,6 +13,7 @@ const IpAddress = std.Io.net.IpAddress;
 const MIN_MTU = 576;
 const MAX_MTU_FRAME_SIZE = 2048;
 const STALE_CONNECTION_TIME_MS = 15_000;
+
 pub const IpAddressIndexContext = struct {
     pub fn eql(_: @This(), a: IpAddress, b: IpAddress) bool {
         return a.eql(&b);
@@ -67,16 +70,18 @@ pub fn deinit(self: *Listener) void {
     self.candidates.deinit();
 }
 
-// common handler for any raw bytes coming in
 pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     if (true) try self.offline(buffer, endpoint);
 }
 
-// handle all offline packets
 fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     const UnconnectedPingPacket = @import("../packets/unconnected-ping.zig");
     const UnconnectedPongPacket = @import("../packets/unconnected-pong.zig");
     const OpenConnectionRequestOne = @import("../packets/open-connection-request-one.zig");
+    const OpenConnectionReplyOne = @import("../packets/open-connection-reply-one.zig");
+    //const OpenConnectionRequestTwoSecurity = @import("../packets/open-connection-request-two.zig").OpenConnectionRequestTwo(true);
+    const OpenConnectionRequestTwoSafeless = @import("../packets/open-connection-request-two.zig").OpenConnectionRequestTwo(false);
+    //const OpenConnectionReplyOne = @import("../packets/open-connection-reply-one.zig");
     const common = @import("../packets/common.zig");
 
     var reader: Reader = .init(buffer, 0);
@@ -91,6 +96,7 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void
         .UnconnectedPing => {
             var packet: UnconnectedPingPacket = undefined;
             try common.read(UnconnectedPingPacket, &reader, &packet);
+
             try writer.writeByte(@intFromEnum(UnconnectedPongPacket.PacketId));
             try common.write(UnconnectedPongPacket, &writer, &.{
                 .ping_time = packet.ping_time,
@@ -103,7 +109,24 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void
             var packet: OpenConnectionRequestOne = undefined;
             try common.read(OpenConnectionRequestOne, &reader, &packet);
 
+            // This should equal the total size
+            std.debug.assert(packet.padding.length + 1 + 16 + 1 == reader.buffer.len);
+
+            try writer.writeByte(@intFromEnum(OpenConnectionReplyOne.PacketId));
+            try common.write(OpenConnectionReplyOne, &writer, &.{
+                .server_guid = self.guid,
+                .security = null,
+                // based on BDS behavior
+                .mtu_size = @min(@as(u16, @intCast(reader.buffer.len + UDP_HEADER_SIZE)), MAX_MTU_SIZE), // packet id, magic, version, udp header
+            });
+            try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
             std.log.info("OpenConnectionRequst1 padding_size: {d}", .{packet.padding.length});
+        },
+        .OpenConnectionRequestTwo => {
+            var packet: OpenConnectionRequestTwoSafeless = undefined;
+            try common.read(OpenConnectionRequestTwoSafeless, &reader, &packet);
+
+            std.log.info("OpenConnectionRequstTwo mtu: {d}, cguid: {d}", .{ packet.mtu, packet.client_guid });
         },
         else => {
             std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), writer.buffer.len, writer.buffer[0] });

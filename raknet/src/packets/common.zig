@@ -2,8 +2,8 @@ const Cursor = @import("../common/cursor.zig");
 const std = @import("std");
 const Magic = @import("../types/magic.zig").Magic;
 const ZeroPadding = @import("../types/zero-padding.zig");
-
-const opt: *?u32 = null;
+const IpAddress = @import("std").Io.net.IpAddress;
+const IpAddressFunctions = @import("../types/address.zig");
 
 pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !void {
     const type_info = @typeInfo(T);
@@ -26,6 +26,10 @@ pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !
                 inline for (type_info.@"struct".fields) |field|
                     try write(field.type, cursor, &@field(value, field.name));
             },
+        },
+        .@"union" => switch (T) {
+            IpAddress => try IpAddressFunctions.serialize(cursor, value),
+            else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
         .array => inline for (value) |*element| {
             try write(type_info.array.child, cursor, element);
@@ -75,6 +79,10 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
                     try read(field.type, cursor, &@field(value, field.name));
             },
         },
+        .@"union" => switch (T) {
+            IpAddress => try IpAddressFunctions.deserialize(cursor, value),
+            else => @compileError("Unsupported union type: " ++ @typeName(T)),
+        },
         .array => for (value) |*element| {
             try read(type_info.array.child, cursor, element);
         },
@@ -94,6 +102,7 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
             },
             else => @compileError("Unsupported pointer type: " ++ @typeName(T)),
         },
+        .void => {},
         else => @compileError("Unknown or unsupported type: " ++ @typeName(T)),
     }
 }
