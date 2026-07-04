@@ -90,8 +90,9 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void
     switch (packet_id) {
         .UnconnectedPing => {
             var packet: UnconnectedPingPacket = undefined;
-            try common.deserialize(UnconnectedPingPacket, &reader, &packet);
-            try common.serialize(UnconnectedPongPacket, &writer, &.{
+            try common.read(UnconnectedPingPacket, &reader, &packet);
+            try writer.writeByte(@intFromEnum(UnconnectedPongPacket.PacketId));
+            try common.write(UnconnectedPongPacket, &writer, &.{
                 .ping_time = packet.ping_time,
                 .server_guid = self.guid,
                 .motd = self.motd,
@@ -100,7 +101,7 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void
         },
         .OpenConnectionRequestOne => {
             var packet: OpenConnectionRequestOne = undefined;
-            try common.deserialize(OpenConnectionRequestOne, &reader, &packet);
+            try common.read(OpenConnectionRequestOne, &reader, &packet);
 
             std.log.info("OpenConnectionRequst1 padding_size: {d}", .{packet.padding.length});
         },
