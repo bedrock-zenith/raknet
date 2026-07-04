@@ -1,10 +1,9 @@
-const Magic = @import("../types/magic.zig").Magic;
+const Magic = @import("../../types/root.zig").Magic;
 const IpAddress = @import("std").Io.net.IpAddress;
-const Reader = @import("../common/cursor.zig").Reader;
 
 pub fn OpenConnectionRequestTwo(comptime security: bool) type {
     return struct {
-        pub const PacketId = @import("../packets/packet-id.zig").PacketId.OpenConnectionRequestOne;
+        pub const PacketId = @import("../packet-id.zig").PacketId.OpenConnectionRequestOne;
 
         magic: Magic,
         security: if (security) struct {

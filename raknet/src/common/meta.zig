@@ -1,9 +1,7 @@
 const Cursor = @import("../common/cursor.zig");
 const std = @import("std");
-const Magic = @import("../types/magic.zig").Magic;
-const ZeroPadding = @import("../types/zero-padding.zig");
+const types = @import("../types/root.zig");
 const IpAddress = @import("std").Io.net.IpAddress;
-const IpAddressFunctions = @import("../types/address.zig");
 
 pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !void {
     const type_info = @typeInfo(T);
@@ -20,15 +18,15 @@ pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !
             try cursor.writeByte(0);
         },
         .@"struct" => switch (T) {
-            Magic => try cursor.append(&Magic.BYTES),
-            ZeroPadding => try cursor.skip(cursor.getRemainingBytes().len),
+            types.Magic => try cursor.append(&types.Magic.BYTES),
+            types.ZeroPadding => try cursor.skip(cursor.getRemainingBytes().len),
             else => {
                 inline for (type_info.@"struct".fields) |field|
                     try write(field.type, cursor, &@field(value, field.name));
             },
         },
         .@"union" => switch (T) {
-            IpAddress => try IpAddressFunctions.serialize(cursor, value),
+            IpAddress => try types.RakAddress.serialize(cursor, value),
             else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
         .array => inline for (value) |*element| {
@@ -68,8 +66,8 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
             value.* = null;
         },
         .@"struct" => switch (T) {
-            Magic => try cursor.skip(Magic.BYTES.len),
-            ZeroPadding => {
+            types.Magic => try cursor.skip(types.Magic.BYTES.len),
+            types.ZeroPadding => {
                 const size = cursor.getRemainingBytes().len;
                 try cursor.skip(size);
                 value.* = .{ .length = size };
@@ -80,7 +78,7 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
             },
         },
         .@"union" => switch (T) {
-            IpAddress => try IpAddressFunctions.deserialize(cursor, value),
+            IpAddress => try types.RakAddress.deserialize(cursor, value),
             else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
         .array => for (value) |*element| {

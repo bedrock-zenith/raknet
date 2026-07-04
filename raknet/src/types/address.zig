@@ -35,23 +35,22 @@ pub fn deserialize(cursor: *Cursor.Reader, address: *IpAddress) !void {
     }
 }
 pub fn serialize(cursor: *Cursor.Writer, address: *const IpAddress) !void {
-    switch (address) {
-        .ip4 => {
+    switch (address.*) {
+        .ip4 => |ip4| {
             try cursor.writeByte(4);
-            try cursor.append(&address.ip4.bytes);
-            try cursor.writeInt(u16, address.ip4.port, .big);
+            try cursor.append(&ip4.bytes);
+            try cursor.writeInt(u16, ip4.port, .big);
         },
-        .ip6 => {
+        .ip6 => |ip6| {
             try cursor.writeByte(6);
 
             // Unknow InnerNetwrokIpv6Interface
             try cursor.writeInt(u16, 0, .little);
 
-            try cursor.writeInt(u16, address.ip6.port, .big);
-            try cursor.writeInt(u32, address.ip6.flow, .big);
-            try cursor.append(&address.ip6.bytes);
-            try cursor.writeInt(u32, address.ip6.interface.index, .big);
+            try cursor.writeInt(u16, ip6.port, .big);
+            try cursor.writeInt(u32, ip6.flow, .big);
+            try cursor.append(&ip6.bytes);
+            try cursor.writeInt(u32, ip6.interface.index, .big);
         },
-        else => return error.UnsupportedIPVersion,
     }
 }
