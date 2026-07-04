@@ -116,17 +116,16 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void
             try common.write(OpenConnectionReplyOne, &writer, &.{
                 .server_guid = self.guid,
                 .security = null,
-                // based on BDS behavior
                 .mtu_size = @min(@as(u16, @intCast(reader.buffer.len + UDP_HEADER_SIZE)), MAX_MTU_SIZE), // packet id, magic, version, udp header
             });
+
             try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
-            std.log.info("OpenConnectionRequst1 padding_size: {d}", .{packet.padding.length});
         },
         .OpenConnectionRequestTwo => {
             var packet: OpenConnectionRequestTwoSafeless = undefined;
             try common.read(OpenConnectionRequestTwoSafeless, &reader, &packet);
 
-            std.log.info("OpenConnectionRequstTwo mtu: {d}, cguid: {d}", .{ packet.mtu, packet.client_guid });
+            std.log.info("OpenConnectionRequestTwo mtu: {d}, client_guid: {d}", .{ packet.mtu, packet.client_guid });
         },
         else => {
             std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), writer.buffer.len, writer.buffer[0] });
