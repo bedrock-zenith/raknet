@@ -77,7 +77,7 @@ fn CursorKind(comptime isReadOnly: bool) type {
         }
 
         // ----- Write -----
-        pub fn writeByte(cursor: *Instance, byte: u8) CursorError!void {
+        pub inline fn writeByte(cursor: *Instance, byte: u8) CursorError!void {
             const offset = cursor.pointer +% 1;
             if (offset > cursor.buffer.len)
                 return error.IndexOutOfBounds;
