@@ -28,6 +28,6 @@ pub fn main(init: std.process.Init) !void {
             .address = message.from,
             .source = &socket,
         };
-        try listener.receive(message.data, &endpoint);
+        listener.receive(message.data, &endpoint);
     }
 }
