@@ -6,6 +6,10 @@ pub const STALE_CONNECTION_TIME_MS = 15_000;
 
 pub const SYSTEM_ADDRESS_COUNT = 20;
 
+// How many frames might be unacknownledged at the same time
+// constant gathered from testing vanilla fork of raknet
+pub const UNACKNOWNLEDGED_WINDOWS_SIZE = 512;
+
 pub const RAKNET_PROTOCOL_VERSION = 11;
 pub const MESSAGE_DATAGRAM_BIT_MASK = 0b1000_0000;
 pub const ACK_DATAGRAM_BIT_MASK = 0b0100_0000;

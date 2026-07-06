@@ -20,11 +20,10 @@ pub const IpAddressIndexContext = struct {
     }
 };
 
-const ConnectionsDictionary = std.HashMap(IpAddress, ServerConnection, IpAddressIndexContext, 80);
-const CandidatesDictionary = std.AutoHashMap(u32, ServerConnection);
+const ConnectionsDictionary = std.AutoHashMap(IpAddress, ServerConnection);
 const FramePool = std.heap.MemoryPool([well_known.MAX_MTU_FRAME_SIZE]u8);
-const ConnectionEvent = Dispatcher(ServerConnection);
-const MessageEvent = Dispatcher(struct {
+pub const ConnectionEvent = Dispatcher(ServerConnection);
+pub const MessageEvent = Dispatcher(struct {
     message: []const u8,
     connection: *const ServerConnection,
 });
@@ -34,7 +33,7 @@ pub const ServerConnection = struct {};
 guid: u64,
 io: std.Io,
 allocator: std.mem.Allocator,
-candidates: CandidatesDictionary,
+candidates: ConnectionsDictionary,
 connections: ConnectionsDictionary,
 frame_pool: FramePool,
 onConnected: ConnectionEvent,
@@ -85,8 +84,10 @@ pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) v
 fn online(_: *Listener, _: []const u8, _: *const Endpoint) void {
     std.log.info("Online packet received!", .{});
 }
+
 fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     const packet_id: PacketId = .from(buffer[0]);
+    //std.log.info("offline: {}", .{buffer[0]});
     (switch (packet_id) {
         .UnconnectedPing => handleUnconnectedPing(self, buffer, endpoint),
         .OpenConnectionRequestOne => handleOpenConnectionOne(self, buffer, endpoint),
@@ -136,18 +137,12 @@ fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: 
             .server_guid = self.guid,
             .protocol_version = well_known.RAKNET_PROTOCOL_VERSION,
         });
-        std.log.info("Incompatible protocol", .{});
     } else {
         std.debug.assert(packet.padding.length + 1 + 16 + 1 == reader.buffer.len);
-
-        // gen the damn cookie!!!
-        var sip: std.hash.SipHash64(1, 3) = .init(&self.secret_key);
-        sip.update(std.mem.asBytes(&endpoint.address));
-
         try writer.writeByte(@intFromEnum(OpenConnectionReplyOne.PacketId));
         try meta.write(OpenConnectionReplyOne, &writer, &.{
             .server_guid = self.guid,
-            .security = @intCast(sip.finalInt() & 0xFFFFFFFF),
+            .security = self.genCookie(endpoint),
             .mtu_size = @min(@as(u16, @intCast(reader.buffer.len + well_known.UDP_HEADER_SIZE)), well_known.MAX_MTU_SIZE), // packet id, magic, version, udp header
         });
     }
@@ -155,7 +150,7 @@ fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: 
     try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
 }
 
-fn handleOpenConnectionTwo(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
+fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     const OpenConnectionRequestTwo = offline_packets.OpenConnectionRequestTwo;
     const OpenConnectionReplyTwo = offline_packets.OpenConnectionReplyTwo;
 
@@ -166,6 +161,9 @@ fn handleOpenConnectionTwo(self: *const Listener, buffer: []const u8, endpoint: 
     var packet: OpenConnectionRequestTwo = undefined;
     try meta.read(OpenConnectionRequestTwo, &reader, &packet);
 
+    const expected_cookie = self.genCookie(endpoint);
+    if (packet.security.cookie != expected_cookie) return;
+
     try writer.writeByte(@intFromEnum(OpenConnectionReplyTwo.PacketId));
     try meta.write(OpenConnectionReplyTwo, &writer, &.{
         .client_address = endpoint.address,
@@ -174,4 +172,18 @@ fn handleOpenConnectionTwo(self: *const Listener, buffer: []const u8, endpoint: 
     });
 
     try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
+
+    try self.candidates.put(endpoint.address, .{});
+}
+
+fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
+    var sip: std.hash.SipHash64(1, 3) = .init(&self.secret_key);
+    // we switch on underlying data type as whole union has different padding for smaller types,
+    // so it might contain undefined bytes inside the hash,
+    // and the hash becomes non deterministic
+    switch (endpoint.address) {
+        .ip4 => |ip4| sip.update(std.mem.asBytes(&ip4)),
+        .ip6 => |ip6| sip.update(std.mem.asBytes(&ip6)),
+    }
+    return @intCast(sip.finalInt() & 0xffff_ffff);
 }
