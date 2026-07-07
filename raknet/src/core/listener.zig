@@ -8,6 +8,7 @@ const Endpoint = @import("../common/endpoint.zig");
 const meta = @import("../common/meta.zig");
 const offline_packets = @import("../packets/offline/root.zig");
 const PacketId = @import("../packets/packet-id.zig").PacketId;
+pub const ServerConnection = @import("./client-connection.zig");
 const well_known = @import("./well-known.zig");
 
 const Listener = @This();
@@ -21,20 +22,17 @@ pub const IpAddressIndexContext = struct {
     }
 };
 
-const ConnectionsDictionary = std.AutoHashMap(IpAddress, ServerConnection);
+const ConnectionsDictionary = std.AutoHashMap(IpAddress, *ServerConnection);
 const FramePool = std.heap.MemoryPool([well_known.MAX_MTU_FRAME_SIZE]u8);
-pub const ConnectionEvent = Dispatcher(ServerConnection);
+pub const ConnectionEvent = Dispatcher(*ServerConnection);
 pub const MessageEvent = Dispatcher(struct {
     message: []const u8,
     connection: *const ServerConnection,
 });
 
-pub const ServerConnection = struct {};
-
 guid: u64,
 io: std.Io,
 allocator: std.mem.Allocator,
-candidates: ConnectionsDictionary,
 connections: ConnectionsDictionary,
 frame_pool: FramePool,
 onConnected: ConnectionEvent,
@@ -49,7 +47,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) !Listener {
         .io = io,
         .allocator = allocator,
         .guid = xiro.next(),
-        .candidates = .init(allocator),
         .connections = .init(allocator),
         .frame_pool = try .initCapacity(allocator, 64), // 131072
         .onConnected = .empty,
@@ -64,14 +61,17 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) !Listener {
 
 pub fn optimze(self: *Listener) void {
     self.frame_pool.reset(self.allocator, .{ .retain_with_limit = 64 });
-    const invalid: u12 = 55435432165135106351065465131;
-    _ = invalid;
 }
 
 pub fn deinit(self: *Listener) void {
     self.frame_pool.deinit(self.allocator);
+
+    var iterator = self.connections.valueIterator();
+    while (iterator.next()) |value| {
+        value.*.deinit();
+        self.allocator.free(value.*);
+    }
     self.connections.deinit();
-    self.candidates.deinit();
 }
 
 pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
@@ -84,18 +84,26 @@ pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) v
         self.offline(buffer, endpoint);
 }
 
-fn online(_: *Listener, _: []const u8, _: *const Endpoint) void {
+fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     std.log.info("Online packet received!", .{});
+
+    if (self.connections.get(endpoint.address)) |connection| {
+        connection.*.base_connection.handle(buffer) catch {};
+    }
 }
 
 fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     const packet_id: PacketId = .from(buffer[0]);
-    //std.log.info("offline: {}", .{buffer[0]});
     (switch (packet_id) {
         .UnconnectedPing => handleUnconnectedPing(self, buffer, endpoint),
         .OpenConnectionRequestOne => handleOpenConnectionOne(self, buffer, endpoint),
         .OpenConnectionRequestTwo => handleOpenConnectionTwo(self, buffer, endpoint),
-        .DisconnectionNotification => {},
+        .DisconnectionNotification => {
+            if (self.connections.getEntry(endpoint.address)) |entry| {
+                if (entry.value_ptr.*.*.base_connection.connection_state == .Unconnected)
+                    self.connections.removeByPtr(entry.key_ptr);
+            }
+        },
         _ => std.log.err("Unknown packet, size: {d}, packet_id: {d}", .{ buffer.len, buffer[0] }),
         else => std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), buffer.len, buffer[0] }),
     }) catch
@@ -103,83 +111,66 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void 
 }
 
 fn handleUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
-    const UnconnectedPingPacket = offline_packets.UnconnectedPing;
-    const UnconnectedPongPacket = offline_packets.UnconnectedPong;
-
-    var writer_buffer: [1024]u8 = undefined;
-    var writer: Writer = .init(&writer_buffer, 0);
-    var reader: Reader = .init(buffer, 1);
-
-    const unused = 65465;
-    _ = unused; // autofix
-
-    var packet: UnconnectedPingPacket = undefined;
-    try meta.read(UnconnectedPingPacket, &reader, &packet);
-
-    try writer.writeByte(@intFromEnum(UnconnectedPongPacket.PacketId));
-    try meta.write(UnconnectedPongPacket, &writer, &.{
+    const packet = try readPacket(buffer, offline_packets.UnconnectedPing);
+    try sendPacket(self, endpoint, offline_packets.UnconnectedPong, &.{
         .ping_time = packet.ping_time,
         .server_guid = self.guid,
         .motd = self.motd,
     });
-    try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
 }
 
 fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
-    const OpenConnectionRequestOne = offline_packets.OpenConnectionRequestOne;
-    const OpenConnectionReplyOne = offline_packets.OpenConnectionReplyOne;
-    const IncompatibleProtocolVersion = offline_packets.IncompatibleProtocolVersion;
+    if (self.connections.get(endpoint.address)) |connection| {
+        try sendPacket(self, endpoint, offline_packets.AlreadyConnected, &.{
+            .client_guid = connection.base_connection.guid,
+        });
+        return;
+    }
 
-    var writer_buffer: [1024]u8 = undefined;
-    var writer: Writer = .init(&writer_buffer, 0);
-    var reader: Reader = .init(buffer, 1);
-
-    var packet: OpenConnectionRequestOne = undefined;
-    try meta.read(OpenConnectionRequestOne, &reader, &packet);
+    const packet = try readPacket(buffer, offline_packets.OpenConnectionRequestOne);
 
     if (packet.protocol_version != well_known.RAKNET_PROTOCOL_VERSION) {
-        try writer.writeByte(@intFromEnum(IncompatibleProtocolVersion.PacketId));
-        try meta.write(IncompatibleProtocolVersion, &writer, &.{
+        try sendPacket(self, endpoint, offline_packets.IncompatibleProtocolVersion, &.{
             .server_guid = self.guid,
             .protocol_version = well_known.RAKNET_PROTOCOL_VERSION,
         });
-    } else {
-        std.debug.assert(packet.padding.length + 1 + 16 + 1 == reader.buffer.len);
-        try writer.writeByte(@intFromEnum(OpenConnectionReplyOne.PacketId));
-        try meta.write(OpenConnectionReplyOne, &writer, &.{
-            .server_guid = self.guid,
-            .security = self.genCookie(endpoint),
-            .mtu_size = @min(@as(u16, @intCast(reader.buffer.len + well_known.UDP_HEADER_SIZE)), well_known.MAX_MTU_SIZE), // packet id, magic, version, udp header
-        });
+        return;
     }
 
-    try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
+    std.debug.assert(packet.padding.length + 1 + 16 + 1 == buffer.len);
+    try sendPacket(self, endpoint, offline_packets.OpenConnectionReplyOne, &.{
+        .server_guid = self.guid,
+        .security = self.genCookie(endpoint),
+        .mtu_size = @min(@as(u16, @intCast(buffer.len + well_known.UDP_HEADER_SIZE)), well_known.MAX_MTU_SIZE), // packet id, magic, version, udp header
+    });
 }
 
 fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
-    const OpenConnectionRequestTwo = offline_packets.OpenConnectionRequestTwo;
-    const OpenConnectionReplyTwo = offline_packets.OpenConnectionReplyTwo;
+    if (self.connections.get(endpoint.address)) |connection| {
+        try sendPacket(self, endpoint, offline_packets.AlreadyConnected, &.{
+            .client_guid = connection.base_connection.guid,
+        });
+        return;
+    }
 
-    var writer_buffer: [1024]u8 = undefined;
-    var writer: Writer = .init(&writer_buffer, 0);
-    var reader: Reader = .init(buffer, 1);
-
-    var packet: OpenConnectionRequestTwo = undefined;
-    try meta.read(OpenConnectionRequestTwo, &reader, &packet);
-
+    const packet = try readPacket(buffer, offline_packets.OpenConnectionRequestTwo);
     const expected_cookie = self.genCookie(endpoint);
-    if (packet.security.cookie != expected_cookie) return;
 
-    try writer.writeByte(@intFromEnum(OpenConnectionReplyTwo.PacketId));
-    try meta.write(OpenConnectionReplyTwo, &writer, &.{
+    if (packet.security.cookie != expected_cookie) {
+        try sendPacket(self, endpoint, offline_packets.ConnectionAttemptFailed, &.{});
+        return;
+    }
+
+    try sendPacket(self, endpoint, offline_packets.OpenConnectionReplyTwo, &.{
         .client_address = endpoint.address,
         .mtu_size = packet.mtu,
         .server_guid = self.guid,
     });
 
-    try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
+    const client = try self.allocator.create(ServerConnection);
+    client.* = .init(endpoint, packet.client_guid);
 
-    try self.candidates.put(endpoint.address, .{});
+    try self.connections.put(endpoint.address, client);
 }
 
 fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
@@ -192,4 +183,20 @@ fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
         .ip6 => |ip6| sip.update(std.mem.asBytes(&ip6)),
     }
     return @intCast(sip.finalInt() & 0xffff_ffff);
+}
+
+inline fn sendPacket(self: *const Listener, endpoint: *const Endpoint, comptime T: type, value: *const T) !void {
+    var writer_buffer: [1024]u8 = undefined;
+    var writer: Writer = .init(&writer_buffer, 0);
+    try writer.writeByte(@intFromEnum(T.PacketId));
+    try meta.write(T, &writer, value);
+
+    try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
+}
+
+inline fn readPacket(buffer: []const u8, comptime T: type) !T {
+    var reader: Reader = .init(buffer, 1);
+    var packet: T = undefined;
+    try meta.read(T, &reader, &packet);
+    return packet;
 }

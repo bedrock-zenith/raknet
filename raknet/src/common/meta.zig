@@ -1,7 +1,8 @@
-const Cursor = @import("../common/cursor.zig");
-const std = @import("std");
-const types = @import("../types/root.zig");
 const IpAddress = @import("std").Io.net.IpAddress;
+const std = @import("std");
+
+const Cursor = @import("../common/cursor.zig");
+const types = @import("../types/root.zig");
 
 pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !void {
     const type_info = @typeInfo(T);
@@ -103,6 +104,15 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
         .void => {},
         else => @compileError("Unknown or unsupported type: " ++ @typeName(T)),
     }
+}
+
+pub inline fn readU24LE(reader: *Cursor.Reader) !u32 {
+    var raw: u24 = 0;
+    try read(u24, reader, &raw);
+    return @intCast(raw);
+}
+pub inline fn writeU24LE(writer: *Cursor.Writer, value: u32) !void {
+    try write(u24, writer, &value);
 }
 
 test "Serializers" {
