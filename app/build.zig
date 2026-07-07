@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+    const strip = b.option(bool, "strip", "Strips debug symbols from emitted executable");
 
     const raknet = b.dependency("raknet", .{
         .target = target,
@@ -52,6 +53,26 @@ pub fn build(b: *std.Build) void {
             .{ .name = "raknet", .module = raknet.module("raknet") }},
         }),
     });
+
+    if (strip) |available| {
+        if (available)
+            exe.root_module.strip = true;
+    }
+
+    // This is where the interesting part begins.
+    // As you can see we are re-defining the same executable but
+    // we're binding it to a dedicated build step.
+    const exe_check = b.addExecutable(.{
+        .name = "zls-check",
+        .root_module = exe.root_module,
+    });
+    // There is no `b.installArtifact(exe_check);` here.
+
+    // Finally we add the "check" step which will be detected
+    // by ZLS and automatically enable Build-On-Save.
+    // If you copy this into your `build.zig`, make sure to rename 'foo'
+    const check = b.step("check", "Check if foo compiles");
+    check.dependOn(&exe_check.step);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

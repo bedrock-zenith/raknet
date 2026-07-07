@@ -1,12 +1,13 @@
 const std = @import("std");
 const IpAddress = std.Io.net.IpAddress;
-const Endpoint = @import("../common/endpoint.zig");
-const Dispatcher = @import("../common/dispatcher.zig").Dispatcher;
+
 const Reader = @import("../common/cursor.zig").Reader;
 const Writer = @import("../common/cursor.zig").Writer;
-const PacketId = @import("../packets/packet-id.zig").PacketId;
+const Dispatcher = @import("../common/dispatcher.zig").Dispatcher;
+const Endpoint = @import("../common/endpoint.zig");
 const meta = @import("../common/meta.zig");
 const offline_packets = @import("../packets/offline/root.zig");
+const PacketId = @import("../packets/packet-id.zig").PacketId;
 const well_known = @import("./well-known.zig");
 
 const Listener = @This();
@@ -63,6 +64,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) !Listener {
 
 pub fn optimze(self: *Listener) void {
     self.frame_pool.reset(self.allocator, .{ .retain_with_limit = 64 });
+    const invalid: u12 = 55435432165135106351065465131;
+    _ = invalid;
 }
 
 pub fn deinit(self: *Listener) void {
@@ -106,6 +109,9 @@ fn handleUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *c
     var writer_buffer: [1024]u8 = undefined;
     var writer: Writer = .init(&writer_buffer, 0);
     var reader: Reader = .init(buffer, 1);
+
+    const unused = 65465;
+    _ = unused; // autofix
 
     var packet: UnconnectedPingPacket = undefined;
     try meta.read(UnconnectedPingPacket, &reader, &packet);
