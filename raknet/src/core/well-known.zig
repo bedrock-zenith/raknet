@@ -8,7 +8,8 @@ pub const SYSTEM_ADDRESS_COUNT = 20;
 
 // How many frames might be unacknownledged at the same time
 // constant gathered from testing vanilla fork of raknet
-pub const UNACKNOWNLEDGED_WINDOWS_SIZE = 512;
+// !!! In relations with other baked in constants, do not change!!!
+pub const UNACKNOWLEDGED_WINDOWS_SIZE = 512;
 
 pub const RAKNET_PROTOCOL_VERSION = 11;
 pub const MESSAGE_DATAGRAM_BIT_MASK = 0b1000_0000;
