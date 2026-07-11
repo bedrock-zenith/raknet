@@ -17,10 +17,9 @@ pub inline fn clear(self: *BitRingBuffer) void {
     self.capacity = RANGE;
 }
 
-pub inline fn iterator(self: *const BitRingBuffer, followKind: bool) BitRingBufferIterator {
+pub inline fn iterator(self: *const BitRingBuffer) BitRingBufferIterator {
     return .{
         .cursor = self.tail,
-        .kind = followKind,
         .ref = self,
     };
 }
@@ -70,46 +69,31 @@ pub inline fn getValue(self: *const BitRingBuffer, index: u32) bool {
 }
 
 /// if head is smaller than tail it means it overflowed
-pub const Range = struct {
+pub const RangeBit = struct {
     tail: u32,
     head: u32,
+    bit: bool,
 };
 
 const BitRingBufferIterator = struct {
-    kind: bool,
     cursor: u32,
     ref: *const BitRingBuffer,
-    pub fn next(self: *@This()) ?Range {
+    pub fn next(self: *@This()) ?RangeBit {
         const head = self.ref.getHead();
         if (self.cursor >= head) return null;
 
-        var start = self.cursor;
+        const start = self.cursor;
         var cursor = self.cursor;
-        var value = self.ref.getValue(Index24Utils.fix(cursor));
+        const value = self.ref.getValue(Index24Utils.fix(cursor));
+        while (cursor < head and self.ref.getValue(Index24Utils.fix(cursor)) == value)
+            cursor += 1;
 
-        const States = enum { Loop, Finalize };
-        process: switch (States.Loop) {
-            .Loop => {
-                while (cursor < head and self.ref.getValue(Index24Utils.fix(cursor)) == value)
-                    cursor += 1;
-
-                continue :process .Finalize;
-            },
-            .Finalize => {
-                if (value != self.kind) {
-                    start = cursor;
-                    value = !value;
-                    continue :process .Loop;
-                }
-
-                self.cursor = cursor;
-                if (start == cursor) return null;
-                return .{
-                    .tail = Index24Utils.fix(start),
-                    .head = Index24Utils.fix(cursor),
-                };
-            },
-        }
+        if (start == cursor) return null;
+        return .{
+            .tail = Index24Utils.fix(start),
+            .head = Index24Utils.fix(cursor),
+            .bit = value,
+        };
     }
 };
 
@@ -157,10 +141,14 @@ test "Overflow Level 2" {
     ring.reserve(0);
     try std.testing.expectEqual(BitRingBuffer.RANGE - 2, ring.capacity);
 
-    var ite = ring.iterator(false);
+    var ite = ring.iterator();
     const value = ite.next();
 
     try std.testing.expect(value != null);
+
+    // false means this range is range of zeros
+    try std.testing.expectEqual(false, value.?.bit);
+
     // bc of overflow, the tail is still big but head small
-    try std.testing.expectEqual(Index24Utils.getDistance(value.?.tail, value.?.head), 2);
+    try std.testing.expectEqual(2, Index24Utils.getDistance(value.?.tail, value.?.head));
 }
