@@ -107,5 +107,4 @@ pub fn handleFragment(self: *BaseConnection, capsule: FrameSet.CapsuleInfo) void
 pub fn handleFrame(self: *BaseConnection, capsule: FrameSet.CapsuleInfo) void {
     _ = self; // autofix
     _ = capsule; // autofix
-
 }
