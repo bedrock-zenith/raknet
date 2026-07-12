@@ -79,7 +79,8 @@ const BitRingBufferIterator = struct {
     remaining: u32,
     ref: *const BitRingBuffer,
     pub fn next(self: *@This()) ?RangeBit {
-        if (self.remaining == 0) return null;
+        const remains = self.remaining;
+        if (remains == 0) return null;
 
         const start = self.index;
         const value = self.ref.getValue(self.index);
@@ -88,7 +89,7 @@ const BitRingBufferIterator = struct {
             self.index = Index24Utils.fixed(self.index +% 1);
         }
 
-        if (start == self.index) return null;
+        if (remains == self.remaining) return null;
         return .{
             .tail = start,
             .head = self.index,
