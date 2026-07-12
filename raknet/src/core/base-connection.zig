@@ -43,7 +43,8 @@ pub fn handleNack(self: *BaseConnection, buffer: []const u8) !void {
 
 pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     var reader: Reader = .init(buffer, 1);
-    const sequence_index: u32 = try meta.readU24LE(&reader);
+    try reader.assert(3);
+    const sequence_index: u32 = meta.readU24LE(&reader);
     std.log.info("SequenceIndex: {}", .{sequence_index});
 
     const last_sequence_index = Index24Utils.fixed(self.incomingAcknowledgeQueue.head -% 1);
@@ -86,7 +87,7 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
 
     // gets optimized away
     var capsule: FrameSet.CapsuleInfo = undefined;
-    while (reader.getRemainingBytes().len > 0) {
+    while (reader.remaining() > 0) {
         try capsule.read(&reader);
 
         std.log.info("CAPSULE; Reliability: {}, data: {any}", .{ capsule.reliability, capsule.body });

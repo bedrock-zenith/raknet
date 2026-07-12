@@ -1,6 +1,10 @@
 pub const Writer = CursorKind(false);
 pub const Reader = CursorKind(true);
 
+const CursorError = error{
+    IndexOutOfBounds,
+};
+
 fn CursorKind(comptime isReadOnly: bool) type {
     return struct {
         const BufferType = if (isReadOnly) ([]const u8) else []u8;
@@ -10,10 +14,6 @@ fn CursorKind(comptime isReadOnly: bool) type {
         buffer: BufferType,
         pointer: usize,
 
-        const CursorError = error{
-            IndexOutOfBounds,
-        };
-
         pub inline fn init(buffer: BufferType, pointer: usize) Instance {
             return .{ .buffer = buffer, .pointer = pointer };
         }
@@ -22,10 +22,9 @@ fn CursorKind(comptime isReadOnly: bool) type {
             cursor.pointer = 0;
         }
 
-        pub inline fn skip(cursor: *Instance, size: usize) CursorError!void {
+        pub inline fn skip(cursor: *Instance, size: usize) void {
             const offset = cursor.pointer +% size;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             cursor.pointer +%= size;
         }
@@ -35,23 +34,28 @@ fn CursorKind(comptime isReadOnly: bool) type {
         pub inline fn getRemainingBytes(cursor: *const Instance) BufferType {
             return cursor.buffer[cursor.pointer..];
         }
+        pub inline fn remaining(cursor: *const Instance) usize {
+            return cursor.buffer.len - cursor.pointer;
+        }
+        pub inline fn assert(cursor: *const Instance, bytes: usize) CursorError!void {
+            if (cursor.remaining() < bytes)
+                return error.IndexOutOfBounds;
+        }
 
         // ----- Read -----
-        pub inline fn readByte(cursor: *Instance) CursorError!u8 {
+        pub inline fn readByte(cursor: *Instance) u8 {
             const offset = cursor.pointer +% 1;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             const byte = cursor.buffer[cursor.pointer];
             cursor.pointer = offset;
             return byte;
         }
 
-        pub inline fn readInt(cursor: *Instance, comptime T: type, endianness: std.builtin.Endian) CursorError!T {
+        pub inline fn readInt(cursor: *Instance, comptime T: type, endianness: std.builtin.Endian) T {
             const size: comptime_int = @divExact(@typeInfo(T).int.bits, 8);
             const offset = cursor.pointer +% size;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             const ptr: *const [size]u8 = @ptrCast(cursor.buffer[cursor.pointer..offset].ptr);
             const value: T = std.mem.readInt(T, ptr, endianness);
@@ -61,51 +65,47 @@ fn CursorKind(comptime isReadOnly: bool) type {
             return value;
         }
 
-        pub inline fn readSlice(cursor: *Instance, size: usize) CursorError!BufferType {
+        pub inline fn readSlice(cursor: *Instance, size: usize) BufferType {
             const offset = cursor.pointer +% size;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             const slice = cursor.buffer[cursor.pointer..offset];
             cursor.pointer = offset;
             return slice;
         }
 
-        pub inline fn readSlicePrefixed(cursor: *Instance, comptime T: type, endianness: std.builtin.Endian) CursorError!BufferType {
-            const length = try readInt(cursor, T, endianness);
-            return try readSlice(cursor, length);
+        pub inline fn readSlicePrefixed(cursor: *Instance, comptime T: type, endianness: std.builtin.Endian) BufferType {
+            const length = readInt(cursor, T, endianness);
+            return readSlice(cursor, length);
         }
 
         // ----- Write -----
-        pub inline fn writeByte(cursor: *Instance, byte: u8) CursorError!void {
+        pub inline fn writeByte(cursor: *Instance, byte: u8) void {
             const offset = cursor.pointer +% 1;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             cursor.buffer[cursor.pointer] = byte;
             cursor.pointer = offset;
         }
 
-        pub inline fn writeInt(cursor: *Instance, comptime T: type, value: T, endianness: std.builtin.Endian) CursorError!void {
+        pub inline fn writeInt(cursor: *Instance, comptime T: type, value: T, endianness: std.builtin.Endian) void {
             const size: comptime_int = @divExact(@typeInfo(T).int.bits, 8);
             const offset = cursor.pointer +% size;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             const ptr: *[size]u8 = @ptrCast(cursor.buffer[cursor.pointer..offset].ptr);
             std.mem.writeInt(T, ptr, value, endianness);
             cursor.pointer = offset;
         }
 
-        pub inline fn appendPrefixed(cursor: *Instance, comptime T: type, buffer: []const u8, endianness: std.builtin.Endian) CursorError!void {
-            try writeInt(cursor, T, @intCast(buffer.len), endianness);
-            try append(cursor, buffer);
+        pub inline fn appendPrefixed(cursor: *Instance, comptime T: type, buffer: []const u8, endianness: std.builtin.Endian) void {
+            writeInt(cursor, T, @intCast(buffer.len), endianness);
+            append(cursor, buffer);
         }
 
-        pub inline fn append(cursor: *Instance, buffer: []const u8) CursorError!void {
+        pub inline fn append(cursor: *Instance, buffer: []const u8) void {
             const offset = cursor.pointer +% buffer.len;
-            if (offset > cursor.buffer.len)
-                return error.IndexOutOfBounds;
+            std.debug.assert(offset <= cursor.buffer.len);
 
             @memcpy(cursor.buffer[cursor.pointer..offset], buffer);
             cursor.pointer = offset;

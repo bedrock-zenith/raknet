@@ -1,12 +1,16 @@
 const IpAddress = @import("std").Io.net.IpAddress;
+
 const Cursor = @import("../common/cursor.zig");
 
 pub fn deserialize(cursor: *Cursor.Reader, address: *IpAddress) !void {
-    const version = try cursor.readByte();
+    try cursor.assert(1);
+    const version = cursor.readByte();
     switch (version) {
         4 => {
-            const addr: *const [4]u8 = (try cursor.readSlice(4))[0..4];
-            const port: u16 = try cursor.readInt(u16, .big);
+            try cursor.assert(6);
+
+            const addr: *const [4]u8 = cursor.readSlice(4)[0..4];
+            const port: u16 = cursor.readInt(u16, .big);
             address.* = .{
                 .ip4 = .{
                     .bytes = addr.*,
@@ -15,13 +19,14 @@ pub fn deserialize(cursor: *Cursor.Reader, address: *IpAddress) !void {
             };
         },
         6 => {
+            try cursor.assert(28);
             // Should be address family, and yes its little endian
-            _ = try cursor.readInt(u16, .little);
-            const port: u16 = try cursor.readInt(u16, .big);
+            _ = cursor.readInt(u16, .little);
+            const port: u16 = cursor.readInt(u16, .big);
 
-            const flow: u32 = try cursor.readInt(u32, .big);
-            const addr: *const [16]u8 = (try cursor.readSlice(16))[0..16];
-            const scopeId: u32 = try cursor.readInt(u32, .big);
+            const flow: u32 = cursor.readInt(u32, .big);
+            const addr: *const [16]u8 = cursor.readSlice(16)[0..16];
+            const scopeId: u32 = cursor.readInt(u32, .big);
 
             address.* = .{ .ip6 = undefined };
             address.*.ip6 = .{
@@ -37,20 +42,24 @@ pub fn deserialize(cursor: *Cursor.Reader, address: *IpAddress) !void {
 pub fn serialize(cursor: *Cursor.Writer, address: *const IpAddress) !void {
     switch (address.*) {
         .ip4 => |ip4| {
-            try cursor.writeByte(4);
-            try cursor.append(&ip4.bytes);
-            try cursor.writeInt(u16, ip4.port, .big);
+            try cursor.assert(7);
+
+            cursor.writeByte(4);
+            cursor.append(&ip4.bytes);
+            cursor.writeInt(u16, ip4.port, .big);
         },
         .ip6 => |ip6| {
-            try cursor.writeByte(6);
+            try cursor.assert(29);
+
+            cursor.writeByte(6);
 
             // Unknow InnerNetwrokIpv6Interface
-            try cursor.writeInt(u16, 0, .little);
+            cursor.writeInt(u16, 0, .little);
 
-            try cursor.writeInt(u16, ip6.port, .big);
-            try cursor.writeInt(u32, ip6.flow, .big);
-            try cursor.append(&ip6.bytes);
-            try cursor.writeInt(u32, ip6.interface.index, .big);
+            cursor.writeInt(u16, ip6.port, .big);
+            cursor.writeInt(u32, ip6.flow, .big);
+            cursor.append(&ip6.bytes);
+            cursor.writeInt(u32, ip6.interface.index, .big);
         },
     }
 }

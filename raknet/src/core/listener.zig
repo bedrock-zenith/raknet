@@ -188,8 +188,8 @@ fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
 inline fn sendPacket(self: *const Listener, endpoint: *const Endpoint, comptime T: type, value: *const T) !void {
     var writer_buffer: [1024]u8 = undefined;
     var writer: Writer = .init(&writer_buffer, 0);
-    try writer.writeByte(@intFromEnum(T.PacketId));
-    try meta.write(T, &writer, value);
+    writer.writeByte(@intFromEnum(T.PacketId));
+    try meta.writeAsserted(T, &writer, value);
 
     try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
 }
@@ -197,6 +197,6 @@ inline fn sendPacket(self: *const Listener, endpoint: *const Endpoint, comptime 
 inline fn readPacket(buffer: []const u8, comptime T: type) !T {
     var reader: Reader = .init(buffer, 1);
     var packet: T = undefined;
-    try meta.read(T, &reader, &packet);
+    try meta.readAsserted(T, &reader, &packet);
     return packet;
 }

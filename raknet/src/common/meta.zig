@@ -4,46 +4,93 @@ const std = @import("std");
 const Cursor = @import("../common/cursor.zig");
 const types = @import("../types/root.zig");
 
+pub inline fn writeAsserted(comptime T: type, cursor: *Cursor.Writer, value: *const T) !void {
+    if (sizeof(T)) |size| {
+        try cursor.assert(size);
+        write(T, cursor, value) catch unreachable;
+    } else |_| {
+        try write(T, cursor, value);
+    }
+}
+pub inline fn readAsserted(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
+    if (sizeof(T)) |size| {
+        try cursor.assert(size);
+        read(T, cursor, value) catch unreachable;
+    } else |_| {
+        try read(T, cursor, value);
+    }
+}
 pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !void {
     const type_info = @typeInfo(T);
     switch (type_info) {
         .int => switch (T) {
-            u8, i8 => try cursor.writeByte(@bitCast(value.*)),
-            u24 => try cursor.writeInt(T, value.*, .little),
-            else => try cursor.writeInt(T, value.*, .big),
+            u8, i8 => cursor.writeByte(@bitCast(value.*)),
+            u24 => cursor.writeInt(T, value.*, .little),
+            else => cursor.writeInt(T, value.*, .big),
         },
-        .optional => if (value.*) |*v| {
-            try cursor.writeByte(1);
-            try write(type_info.optional.child, cursor, v);
-        } else {
-            try cursor.writeByte(0);
+        .optional => {
+            try cursor.assert(1);
+            if (value.*) |*v| {
+                cursor.writeByte(1);
+
+                if (sizeof(type_info.optional.child)) |size| {
+                    try cursor.assert(size);
+                    write(type_info.optional.child, cursor, v) catch unreachable;
+                } else |_| {
+                    try write(type_info.optional.child, cursor, v);
+                }
+            } else {
+                cursor.writeByte(0);
+            }
         },
         .@"struct" => switch (T) {
-            types.Magic => try cursor.append(&types.Magic.BYTES),
-            types.ZeroPadding => try cursor.skip(cursor.getRemainingBytes().len),
+            types.Magic => cursor.append(&types.Magic.BYTES),
+            types.ZeroPadding => cursor.skip(cursor.remaining()),
             else => {
-                inline for (type_info.@"struct".fields) |field|
-                    try write(field.type, cursor, &@field(value, field.name));
+                if (sizeof(T)) |size| {
+                    try cursor.assert(size);
+                    inline for (type_info.@"struct".fields) |field|
+                        write(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                } else |_| {
+                    inline for (type_info.@"struct".fields) |field| {
+                        if (sizeof(field.type)) |size| {
+                            try cursor.assert(size);
+                            write(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                        } else |_| {
+                            try write(field.type, cursor, &@field(value, field.name));
+                        }
+                    }
+                }
             },
         },
         .@"union" => switch (T) {
             IpAddress => try types.RakAddress.serialize(cursor, value),
             else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
-        .array => inline for (value) |*element| {
-            try write(type_info.array.child, cursor, element);
+        .array => if (sizeof(type_info.array.child)) |size| {
+            try cursor.assert(size * type_info.array.len);
+            inline for (value) |*element| {
+                write(type_info.array.child, cursor, element) catch unreachable;
+            }
+        } else |_| {
+            inline for (value) |*element| {
+                try write(type_info.array.child, cursor, element);
+            }
         },
         .pointer => switch (type_info.pointer.size) {
             .slice => {
-                if (type_info.pointer.child == u8)
-                    try cursor.appendPrefixed(u16, value.*, .big)
-                else
-                    @compileError("Unsupported slice type: " ++ @typeName(T));
+                if (type_info.pointer.child == u8) {
+                    try cursor.assert(2 + value.*.len);
+                    cursor.appendPrefixed(u16, value.*, .big);
+                } else @compileError("Unsupported slice type: " ++ @typeName(T));
             },
             .one => {
                 const child_info = @typeInfo(type_info.pointer.child);
                 if (child_info == .array) switch (child_info.array.child) {
-                    u8 => try cursor.append(value.*),
+                    u8 => {
+                        try cursor.assert(child_info.array.len);
+                        cursor.append(value.*);
+                    },
                     else => @compileError("Unsupported array pointer type: " ++ @typeName(T)),
                 } else @compileError("Unsupported single pointer type: " ++ @typeName(T));
             },
@@ -57,45 +104,80 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
     const type_info = @typeInfo(T);
     switch (type_info) {
         .int => switch (T) {
-            u8, i8 => value.* = try cursor.readByte(),
-            u24 => value.* = try cursor.readInt(T, .little),
-            else => value.* = try cursor.readInt(T, .big),
+            u8, i8 => value.* = cursor.readByte(),
+            u24 => value.* = cursor.readInt(T, .little),
+            else => value.* = cursor.readInt(T, .big),
         },
-        .optional => if (try cursor.readByte() != 0) {
-            try read(type_info.optional.child, cursor, &value.*.?);
-        } else {
-            value.* = null;
+        .optional => {
+            try cursor.assert(1);
+            const v = cursor.readByte();
+
+            if (v != 0) {
+                if (sizeof(type_info.optional.child)) |size| {
+                    try cursor.assert(size);
+                    read(type_info.optional.child, cursor, &value.*.?) catch unreachable;
+                } else |_| {
+                    try read(type_info.optional.child, cursor, &value.*.?);
+                }
+            } else {
+                value.* = null;
+            }
         },
         .@"struct" => switch (T) {
-            types.Magic => try cursor.skip(types.Magic.BYTES.len),
+            types.Magic => cursor.skip(types.Magic.BYTES.len),
             types.ZeroPadding => {
-                const size = cursor.getRemainingBytes().len;
-                try cursor.skip(size);
+                const size = cursor.remaining();
+                cursor.skip(size);
                 value.* = .{ .length = size };
             },
             else => {
-                inline for (type_info.@"struct".fields) |field|
-                    try read(field.type, cursor, &@field(value, field.name));
+                if (sizeof(T)) |size| {
+                    try cursor.assert(size);
+                    inline for (type_info.@"struct".fields) |field|
+                        read(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                } else |_| {
+                    inline for (type_info.@"struct".fields) |field| {
+                        if (sizeof(field.type)) |s| {
+                            try cursor.assert(s);
+                            read(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                        } else |_| {
+                            try read(field.type, cursor, &@field(value, field.name));
+                        }
+                    }
+                }
             },
         },
         .@"union" => switch (T) {
             IpAddress => try types.RakAddress.deserialize(cursor, value),
             else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
-        .array => for (value) |*element| {
-            try read(type_info.array.child, cursor, element);
+        .array => if (sizeof(type_info.array.child)) |size| {
+            try cursor.assert(size * type_info.array.len);
+            inline for (value) |*element| {
+                read(type_info.array.child, cursor, element) catch unreachable;
+            }
+        } else |_| {
+            inline for (value) |*element| {
+                try read(type_info.array.child, cursor, element);
+            }
         },
         .pointer => switch (type_info.pointer.size) {
             .slice => {
-                if (type_info.pointer.child == u8)
-                    value.* = try cursor.readSlicePrefixed(u16, .big)
-                else
-                    @compileError("Unsupported slice type: " ++ @typeName(T));
+                if (type_info.pointer.child == u8) {
+                    try cursor.assert(2);
+                    const size: u16 = undefined;
+                    read(u16, &size);
+                    try cursor.assert(size);
+                    value.* = cursor.readSlice(size);
+                } else @compileError("Unsupported slice type: " ++ @typeName(T));
             },
             .one => {
                 const child_info = @typeInfo(type_info.pointer.child);
                 if (child_info == .array) switch (child_info.array.child) {
-                    u8 => value.* = (try cursor.readSlice(child_info.array.len))[0..child_info.array.len],
+                    u8 => {
+                        try cursor.assert(child_info.array.len);
+                        value.* = cursor.readSlice(child_info.array.len)[0..child_info.array.len];
+                    },
                     else => @compileError("Unsupported array pointer type: " ++ @typeName(T)),
                 } else @compileError("Unsupported single pointer type: " ++ @typeName(T));
             },
@@ -106,13 +188,45 @@ pub inline fn read(comptime T: type, cursor: *Cursor.Reader, value: *T) !void {
     }
 }
 
-pub inline fn readU24LE(reader: *Cursor.Reader) !u32 {
+pub inline fn sizeof(comptime T: type) error{Unsupported}!usize {
+    const type_info = @typeInfo(T);
+    return switch (type_info) {
+        .int => @divExact(@typeInfo(T).int.bits, 8),
+        .@"struct" => switch (T) {
+            types.Magic => types.Magic.BYTES.len,
+            types.ZeroPadding => 0,
+            else => {
+                comptime var size: usize = 0;
+                inline for (type_info.@"struct".fields) |field|
+                    size +%= try sizeof(field.type);
+
+                return size;
+            },
+        },
+        .@"union" => error.Unsupported,
+        .array => |array_type| array_type.len * try sizeof(array_type.child),
+        .pointer => switch (type_info.pointer.size) {
+            .one => {
+                const child_info = @typeInfo(type_info.pointer.child);
+                if (child_info == .array) switch (child_info.array.child) {
+                    u8 => return child_info.array.len,
+                    else => return error.Unsupported,
+                } else return error.Unsupported;
+            },
+            else => error.Unsupported,
+        },
+        .void => 0,
+        else => error.Unsupported,
+    };
+}
+
+pub inline fn readU24LE(reader: *Cursor.Reader) u32 {
     var raw: u24 = 0;
-    try read(u24, reader, &raw);
+    read(u24, reader, &raw) catch unreachable;
     return @intCast(raw);
 }
-pub inline fn writeU24LE(writer: *Cursor.Writer, value: u32) !void {
-    try write(u24, writer, &value);
+pub inline fn writeU24LE(writer: *Cursor.Writer, value: u32) void {
+    write(u24, writer, &value) catch unreachable;
 }
 
 test "Serializers" {

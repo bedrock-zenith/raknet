@@ -64,33 +64,41 @@ pub const CapsuleInfo = struct {
     body: []const u8,
 
     pub fn read(self: *CapsuleInfo, reader: *Reader) !void {
-        const flags = try reader.readByte();
+        try reader.assert(3);
+        const flags = reader.readByte();
         const reliability: CapsuleReliability = @enumFromInt((flags >> 5) & 0x7);
         self.reliability = reliability;
 
         const is_fragmented = (flags & FRAGMENTED_BIT != 0);
         // raknet being in bits is just lame
-        const data_len = (try reader.readInt(u16, .big)) >> 3;
+        const data_len = reader.readInt(u16, .big) >> 3;
 
-        if (reliability.isReliable())
-            self.reliableIndex = try meta.readU24LE(reader);
+        if (reliability.isReliable()) {
+            try reader.assert(3);
+            self.reliableIndex = meta.readU24LE(reader);
+        }
 
-        if (reliability.isSequenced())
-            self.sequenceIndex = try meta.readU24LE(reader);
+        if (reliability.isSequenced()) {
+            try reader.assert(3);
+            self.sequenceIndex = meta.readU24LE(reader);
+        }
 
         if (reliability.isSequencedOrdered()) {
-            self.orderingIndex = try meta.readU24LE(reader);
-            self.orderChannel = try reader.readByte();
+            try reader.assert(4);
+            self.orderingIndex = meta.readU24LE(reader);
+            self.orderChannel = reader.readByte();
         }
 
         if (is_fragmented) {
+            try reader.assert(4 + 2 + 4);
             self.fragment_data.? = .{
-                .count = try reader.readInt(u32, .big),
-                .id = try reader.readInt(u16, .big),
-                .index = try reader.readInt(u32, .big),
+                .count = reader.readInt(u32, .big),
+                .id = reader.readInt(u16, .big),
+                .index = reader.readInt(u32, .big),
             };
         }
 
-        self.body = try reader.readSlice(data_len);
+        try reader.assert(data_len);
+        self.body = reader.readSlice(data_len);
     }
 };
