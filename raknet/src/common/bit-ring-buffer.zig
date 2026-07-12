@@ -4,7 +4,12 @@ const well_known = @import("../core/well-known.zig");
 pub const RANGE = well_known.UNACKNOWLEDGED_WINDOWS_SIZE;
 const Index24Utils = @import("./index-24-utils.zig");
 
+pub const RANGE_MASK = RANGE -| 1;
 const BitSet = std.bit_set.ArrayBitSet(usize, well_known.UNACKNOWLEDGED_WINDOWS_SIZE);
+comptime {
+    if (!std.math.isPowerOfTwo(RANGE))
+        @compileError("UNACKNOWLEDGED_WINDOWS_SIZE must be a power of two for BitRingBuffer optimization.");
+}
 
 const BitRingBuffer = @This();
 head: u32 = 0,
@@ -17,55 +22,49 @@ pub inline fn clear(self: *BitRingBuffer) void {
     self.capacity = RANGE;
 }
 
+/// Iterator could be invalidated if BitRingBuffer is changed
 pub inline fn iterator(self: *const BitRingBuffer) BitRingBufferIterator {
     return .{
-        .cursor = self.tail,
+        .index = self.tail,
+        .remaining = RANGE -% self.capacity,
         .ref = self,
     };
 }
 
-pub inline fn getHead(self: *const BitRingBuffer) u32 {
-    return Index24Utils.cover(self.head, self.tail > self.head);
-}
-
 /// newIndex inclusive
-/// Asserts newIndex can extend without overflowing capacity
-/// Asserts newIndex is larger or equal to head it self
-pub inline fn reserve(self: *BitRingBuffer, new: u32) void {
-    const newIndex = new + 1;
-    std.debug.assert(Index24Utils.getDistance(self.head, newIndex) >= 0);
-    std.debug.assert(Index24Utils.getDistance(self.head, newIndex) <= self.capacity);
+/// Asserts new is always greater or equal self.head
+/// Asserts new still fits into free self.capacity
+pub fn reserve(self: *BitRingBuffer, new: u32) void {
+    const newIndex = Index24Utils.fixed(new + 1);
+    const dist = Index24Utils.distance(self.head, newIndex);
 
-    const headIndex = self.head % RANGE;
-    const tailIndex = self.tail % RANGE;
-    const endIndex = newIndex % RANGE;
+    std.debug.assert(dist >= 0);
+    std.debug.assert(dist <= self.capacity);
+
+    const headIndex = self.head & RANGE_MASK;
+    const endIndex = newIndex & RANGE_MASK;
+
     if (endIndex < headIndex) {
         self.buffer.setRangeValue(.{ .start = headIndex, .end = RANGE }, false);
         self.buffer.setRangeValue(.{ .start = 0, .end = endIndex }, false);
     } else {
         self.buffer.setRangeValue(.{ .start = headIndex, .end = endIndex }, false);
     }
-    if (endIndex <= tailIndex)
-        self.capacity = (tailIndex - endIndex)
-    else
-        self.capacity = RANGE - (endIndex - tailIndex);
-    self.head = Index24Utils.fix(newIndex);
+
+    self.capacity -= @bitCast(dist);
+    self.head = newIndex;
 }
 
 pub inline fn setValue(self: *BitRingBuffer, index: u32, value: bool) void {
-    std.debug.assert(Index24Utils.getDistance(self.tail, index) >= 0);
-    std.debug.assert(Index24Utils.getDistance(self.head, index) < 0);
-
-    // modulo eliminates the overflow visibility
-    self.buffer.setValue(index % RANGE, value);
+    std.debug.assert(Index24Utils.distance(self.tail, index) >= 0);
+    std.debug.assert(Index24Utils.distance(self.head, index) < 0);
+    self.buffer.setValue(index & RANGE_MASK, value);
 }
 
 pub inline fn getValue(self: *const BitRingBuffer, index: u32) bool {
-    std.debug.assert(Index24Utils.getDistance(self.tail, index) >= 0);
-    std.debug.assert(Index24Utils.getDistance(self.head, index) < 0);
-
-    // modulo eliminates the overflow visibility
-    return self.buffer.isSet(index % RANGE);
+    std.debug.assert(Index24Utils.distance(self.tail, index) >= 0);
+    std.debug.assert(Index24Utils.distance(self.head, index) < 0);
+    return self.buffer.isSet(index & RANGE_MASK);
 }
 
 /// if head is smaller than tail it means it overflowed
@@ -76,22 +75,23 @@ pub const RangeBit = struct {
 };
 
 const BitRingBufferIterator = struct {
-    cursor: u32,
+    index: u32,
+    remaining: u32,
     ref: *const BitRingBuffer,
     pub fn next(self: *@This()) ?RangeBit {
-        const head = self.ref.getHead();
-        if (self.cursor >= head) return null;
+        if (self.remaining == 0) return null;
 
-        const start = self.cursor;
-        var cursor = self.cursor;
-        const value = self.ref.getValue(Index24Utils.fix(cursor));
-        while (cursor < head and self.ref.getValue(Index24Utils.fix(cursor)) == value)
-            cursor += 1;
+        const start = self.index;
+        const value = self.ref.getValue(self.index);
+        while (self.remaining > 0 and self.ref.getValue(self.index) == value) {
+            self.remaining -%= 1;
+            self.index = Index24Utils.fixed(self.index +% 1);
+        }
 
-        if (start == cursor) return null;
+        if (start == self.index) return null;
         return .{
-            .tail = Index24Utils.fix(start),
-            .head = Index24Utils.fix(cursor),
+            .tail = start,
+            .head = self.index,
             .bit = value,
         };
     }
@@ -150,5 +150,5 @@ test "Overflow Level 2" {
     try std.testing.expectEqual(false, value.?.bit);
 
     // bc of overflow, the tail is still big but head small
-    try std.testing.expectEqual(2, Index24Utils.getDistance(value.?.tail, value.?.head));
+    try std.testing.expectEqual(2, Index24Utils.distance(value.?.tail, value.?.head));
 }

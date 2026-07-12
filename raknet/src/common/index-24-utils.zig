@@ -1,43 +1,30 @@
 const std = @import("std");
 
-pub inline fn fix(number: u32) u32 {
-    return number & 0xFF_FFFF;
+const MAX_U24: u32 = @intCast(std.math.maxInt(u24));
+const HALF_U24: u32 = @divTrunc(MAX_U24, 2);
+
+pub inline fn fixed(number: u32) u32 {
+    return number & MAX_U24;
 }
 
-test "fix" {
-    try std.testing.expectEqual(@as(u32, 1), fix(0xFF_FFFF + 2));
+test "fixed" {
+    try std.testing.expectEqual(@as(u32, 1), fixed(0xFF_FFFF + 2));
 }
 
-/// makes sure the overflowed value is still larger than the overflow cap
-pub inline fn cover(number: u32, overflowed: bool) u32 {
-    if (overflowed)
-        return number +% 0x0100_0000
-    else
-        return number;
+pub inline fn overflowed(old: u32, new: u32) bool {
+    return ((new -% old) & MAX_U24) >= HALF_U24;
 }
+pub inline fn distance(old: u32, new: u32) i32 {
+    const diff = (new -% old) & MAX_U24;
 
-pub inline fn hasOverflowed(old: u32, new: u32) bool {
-    // old number has to be large enough
-    // new number has to be small enough
-    // since UDP is unreliable we have window where the index might land
+    if (diff >= HALF_U24) {
+        return @bitCast(diff -% 0x0100_0000);
+    }
 
-    // This is hacky way to do things, it doesn't even work normally,
-    // we just have to be sure the distance between two numbers is small enough
-    // Well it's tuned for our UNACKNOWLEDGED_WINDOWS_SIZE
-    return ((new < 0xFFF) and (old > 0xF_FFFF));
-}
-
-pub inline fn getDistance(old: u32, new: u32) i32 {
-    if (hasOverflowed(old, new))
-        // u24 0xFFFFFF and 0 has distance of 1
-        return @bitCast((new +% 0x0100_0000) -% old)
-    else if (hasOverflowed(new, old))
-        return @bitCast(new -% (old +% 0x0100_0000))
-    else
-        return @bitCast(new -% old);
+    return @bitCast(diff);
 }
 
 test "distance" {
-    try std.testing.expectEqual(getDistance(0xFF_FFFF, 1), 2);
-    try std.testing.expectEqual(getDistance(0, 0xFF_FFFF), -1);
+    try std.testing.expectEqual(distance(0xFF_FFFF, 1), 2);
+    try std.testing.expectEqual(distance(0, 0xFF_FFFF), -1);
 }
