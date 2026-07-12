@@ -1,6 +1,3 @@
 {
-  "words": [
-    "usize",
-    "comptime"
-  ]
+   "words": ["usize", "comptime", "raknet"]
 }
