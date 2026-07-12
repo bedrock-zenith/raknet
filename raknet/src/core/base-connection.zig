@@ -5,6 +5,7 @@ const Reader = @import("../common/cursor.zig").Reader;
 const Endpoint = @import("../common/endpoint.zig");
 const Index24Utils = @import("../common/index-24-utils.zig");
 const meta = @import("../common/meta.zig");
+const FrameSet = @import("../packets/online/root.zig").FrameSet;
 const well_known = @import("./well-known.zig");
 const ConnectionState = @import("connection-state.zig").ConnectionState;
 
@@ -74,7 +75,7 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // 2 -> 5, 2 packets lost
     //
     // ref: BitRingBuffer.reserve second assert sIndex >= head
-    if (distance > 1)
+    if (distance > 0)
         // This call already sets other bits to zero, meaning the packets were lost
         self.incomingAcknowledgeQueue.reserve(sequence_index);
 
@@ -82,4 +83,11 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     //
     // ref: BitRingBuffer.@etValue second assert, head = sequenceIndex + 1 => sequenceIndex < head
     self.incomingAcknowledgeQueue.setValue(sequence_index, true);
+
+    // gets optimized away
+    var frame: FrameSet.CapsuleInfo = undefined;
+    while (reader.getRemainingBytes().len > 0) {
+        try frame.read(&reader);
+        std.log.info("Reliability: {}, data: {any}", .{ frame.reliability, frame.body });
+    }
 }
