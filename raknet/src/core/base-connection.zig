@@ -85,9 +85,27 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     self.incomingAcknowledgeQueue.setValue(sequence_index, true);
 
     // gets optimized away
-    var frame: FrameSet.CapsuleInfo = undefined;
+    var capsule: FrameSet.CapsuleInfo = undefined;
     while (reader.getRemainingBytes().len > 0) {
-        try frame.read(&reader);
-        std.log.info("Reliability: {}, data: {any}", .{ frame.reliability, frame.body });
+        try capsule.read(&reader);
+
+        std.log.info("CAPSULE; Reliability: {}, data: {any}", .{ capsule.reliability, capsule.body });
+        if (capsule.fragment_data) |_|
+            handleFragment(self, capsule)
+        else
+            handleFrame(self, capsule);
     }
+}
+
+pub fn handleFragment(self: *BaseConnection, capsule: FrameSet.CapsuleInfo) void {
+    _ = capsule; // autofix
+    _ = self; // autofix
+
+    // Rebuild and call handleFrame as well
+}
+
+pub fn handleFrame(self: *BaseConnection, capsule: FrameSet.CapsuleInfo) void {
+    _ = self; // autofix
+    _ = capsule; // autofix
+
 }
