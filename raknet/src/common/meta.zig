@@ -36,7 +36,7 @@ pub inline fn write(comptime T: type, cursor: *Cursor.Writer, value: *const T) !
         .pointer => switch (type_info.pointer.size) {
             .slice => {
                 if (type_info.pointer.child == u8)
-                    try cursor.appendPrexifed(u16, value.*, .big)
+                    try cursor.appendPrefixed(u16, value.*, .big)
                 else
                     @compileError("Unsupported slice type: " ++ @typeName(T));
             },

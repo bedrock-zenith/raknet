@@ -60,7 +60,7 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // late packets, late packets also covers old duplicates
     //
     // ref: BitRingBuffer.@etValue first assert sequenceIndex >= tail
-    if (distance +% self.incomingAcknowledgeQueue.capacity < BitRingBuffer.RANGE) {
+    if (distance +% @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity)) < BitRingBuffer.RANGE) {
         return;
     }
 
@@ -74,11 +74,9 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // 2 -> 5, 2 packets lost
     //
     // ref: BitRingBuffer.reserve second assert sIndex >= head
-    if (distance > 1) {
+    if (distance > 1)
         // This call already sets other bits to zero, meaning the packets were lost
         self.incomingAcknowledgeQueue.reserve(sequence_index);
-        self.incomingLastActiveSequenceIndex = sequence_index;
-    }
 
     // Set this frame-set as received
     //

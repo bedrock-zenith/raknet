@@ -9,7 +9,7 @@ pub fn init(endpoint: *const Endpoint, guid: u64) ClientConnection {
         .base_connection = .{
             .endpoint = endpoint.*,
             .guid = guid,
-            .incomingMissingDatagram = undefined,
+            .incomingAcknowledgeQueue = .{},
             .connection_state = .Unconnected,
         },
     };

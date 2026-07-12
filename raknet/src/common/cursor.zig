@@ -97,7 +97,7 @@ fn CursorKind(comptime isReadOnly: bool) type {
             cursor.pointer = offset;
         }
 
-        pub inline fn appendPrexifed(cursor: *Instance, comptime T: type, buffer: []const u8, endianness: std.builtin.Endian) CursorError!void {
+        pub inline fn appendPrefixed(cursor: *Instance, comptime T: type, buffer: []const u8, endianness: std.builtin.Endian) CursorError!void {
             try writeInt(cursor, T, @intCast(buffer.len), endianness);
             try append(cursor, buffer);
         }
