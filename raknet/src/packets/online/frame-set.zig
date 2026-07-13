@@ -57,6 +57,8 @@ pub const CapsuleInfo = struct {
         id: u16,
         count: u32,
         index: u32,
+        // We can use it as linked list when building fragments together
+        next: ?*CapsuleInfo,
     },
     orderingIndex: u32,
     reliableIndex: u32,
@@ -92,6 +94,7 @@ pub const CapsuleInfo = struct {
         if (is_fragmented) {
             try reader.assert(4 + 2 + 4);
             self.fragment_data.? = .{
+                .next = null,
                 .count = reader.readInt(u32, .big),
                 .id = reader.readInt(u16, .big),
                 .index = reader.readInt(u32, .big),
