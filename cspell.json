@@ -1,3 +1,9 @@
 {
-   "words": ["usize", "comptime", "raknet"]
+  "words": [
+    "usize",
+    "comptime",
+    "raknet",
+    "orelse",
+    "deinit"
+  ]
 }

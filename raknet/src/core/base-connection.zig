@@ -5,7 +5,9 @@ const Reader = @import("../common/cursor.zig").Reader;
 const Endpoint = @import("../common/endpoint.zig");
 const Index24Utils = @import("../common/index-24-utils.zig");
 const meta = @import("../common/meta.zig");
+const PoolAllocator = @import("../common/pool-allocator.zig");
 const FrameSet = @import("../packets/online/root.zig").FrameSet;
+const FragmentBuilder = @import("./fragment-builder.zig");
 const well_known = @import("./well-known.zig");
 const ConnectionState = @import("connection-state.zig").ConnectionState;
 
@@ -15,6 +17,35 @@ endpoint: Endpoint,
 guid: u64,
 connection_state: ConnectionState = .Unconnected,
 incomingAcknowledgeQueue: BitRingBuffer,
+pool_allocator: *PoolAllocator,
+fragments: *[64]FragmentBuilder,
+
+pub fn init(endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !BaseConnection {
+    var con: BaseConnection = .{
+        .incomingAcknowledgeQueue = .{},
+        .guid = guid,
+        .endpoint = endpoint,
+        .pool_allocator = pool,
+        .fragments = undefined,
+    };
+
+    // fragments have to be clean, as de-initialization loops them
+    con.fragments = try pool.create([64]FragmentBuilder);
+    @memset(con.fragments, .empty);
+
+    return con;
+}
+
+pub fn deinit(self: *BaseConnection) void {
+    // Do not deallocate anything that wasn't allocated in BaseConnection
+    // Clean up any unprocessed fragments
+    for (self.fragments) |*v| {
+        var iterator = v.iterator();
+        while (iterator.next()) |c|
+            self.pool_allocator.destroy(c);
+    }
+    self.pool_allocator.destroy(self.fragments);
+}
 
 pub fn handle(self: *BaseConnection, buffer: []const u8) !void {
     // Ack

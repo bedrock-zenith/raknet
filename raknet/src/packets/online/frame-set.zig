@@ -58,7 +58,7 @@ pub const CapsuleInfo = struct {
         count: u32,
         index: u32,
         // We can use it as linked list when building fragments together
-        next: ?*CapsuleInfo,
+        next: ?*CapsuleInfo = null,
     },
     orderingIndex: u32,
     reliableIndex: u32,

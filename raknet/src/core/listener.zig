@@ -6,6 +6,7 @@ const Writer = @import("../common/cursor.zig").Writer;
 const Dispatcher = @import("../common/dispatcher.zig").Dispatcher;
 const Endpoint = @import("../common/endpoint.zig");
 const meta = @import("../common/meta.zig");
+const PoolAllocator = @import("../common/pool-allocator.zig");
 const offline_packets = @import("../packets/offline/root.zig");
 const PacketId = @import("../packets/packet-id.zig").PacketId;
 pub const ServerConnection = @import("./client-connection.zig");
@@ -23,7 +24,7 @@ pub const IpAddressIndexContext = struct {
 };
 
 const ConnectionsDictionary = std.AutoHashMap(IpAddress, *ServerConnection);
-const FramePool = std.heap.MemoryPool([well_known.MAX_MTU_FRAME_SIZE]u8);
+//std.heap.MemoryPool([well_known.MAX_MTU_FRAME_SIZE]u8);
 pub const ConnectionEvent = Dispatcher(*ServerConnection);
 pub const MessageEvent = Dispatcher(struct {
     message: []const u8,
@@ -34,7 +35,7 @@ guid: u64,
 io: std.Io,
 allocator: std.mem.Allocator,
 connections: ConnectionsDictionary,
-frame_pool: FramePool,
+pool_allocator: PoolAllocator,
 onConnected: ConnectionEvent,
 onDisconnected: ConnectionEvent,
 onMessage: MessageEvent,
@@ -48,7 +49,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) !Listener {
         .allocator = allocator,
         .guid = xiro.next(),
         .connections = .init(allocator),
-        .frame_pool = try .initCapacity(allocator, 64), // 131072
+        .pool_allocator = try .init(allocator), // 131072
         .onConnected = .empty,
         .onDisconnected = .empty,
         .onMessage = .empty,
@@ -60,7 +61,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) !Listener {
 }
 
 pub fn optimze(self: *Listener) void {
-    self.frame_pool.reset(self.allocator, .{ .retain_with_limit = 64 });
+    self.frame_pool.pool.reset(self.allocator, .{ .retain_with_limit = 64 });
 }
 
 pub fn deinit(self: *Listener) void {
@@ -168,7 +169,11 @@ fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const
     });
 
     const client = try self.allocator.create(ServerConnection);
-    client.* = .init(endpoint, packet.client_guid);
+    client.* = try .init(
+        endpoint,
+        self,
+        packet.client_guid,
+    );
 
     try self.connections.put(endpoint.address, client);
 }

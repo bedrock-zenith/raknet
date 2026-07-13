@@ -6,6 +6,7 @@ count: u32 = 0,
 buffer_size: u32 = 0,
 first: ?*CapsuleInfo = null,
 last: ?*CapsuleInfo = null,
+pub const empty: @This() = .{};
 
 pub fn append(self: *@This(), capsule: *CapsuleInfo) bool {
     var meta = &(capsule.fragment_data orelse return false);
@@ -65,4 +66,8 @@ pub inline fn iterator(self: *@This()) struct {
     }
 } {
     return .{ .cursor = self.first };
+}
+
+pub inline fn reset(self: *@This()) void {
+    self.* = .empty;
 }
