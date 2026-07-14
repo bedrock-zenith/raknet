@@ -18,22 +18,22 @@ guid: u64,
 connection_state: ConnectionState = .Unconnected,
 incomingAcknowledgeQueue: BitRingBuffer,
 pool_allocator: *PoolAllocator,
-fragments: *[64]FragmentBuilder,
+fragments: [64]FragmentBuilder,
+// Store window for FrameSet that weren't acknowledged
+memory_window: [well_known.UNACKNOWLEDGED_WINDOWS_SIZE]?*const FrameSet.CapsuleInfo,
 
-pub fn init(endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !BaseConnection {
-    var con: BaseConnection = .{
-        .incomingAcknowledgeQueue = .{},
+pub fn init(self: *BaseConnection, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !BaseConnection {
+    self.* = .{
         .guid = guid,
         .endpoint = endpoint,
+        .connection_state = .Unconnected,
+        .incomingAcknowledgeQueue = .{},
         .pool_allocator = pool,
         .fragments = undefined,
+        .memory_window = undefined,
     };
-
-    // fragments have to be clean, as de-initialization loops them
-    con.fragments = try pool.create([64]FragmentBuilder);
-    @memset(con.fragments, .empty);
-
-    return con;
+    @memset(self.fragments, .empty);
+    @memset(self.memory_window, null);
 }
 
 pub fn deinit(self: *BaseConnection) void {
@@ -44,7 +44,9 @@ pub fn deinit(self: *BaseConnection) void {
         while (iterator.next()) |c|
             self.pool_allocator.destroy(c);
     }
-    self.pool_allocator.destroy(self.fragments);
+    for (self.memory_window) |window|
+        if (window) |w|
+            self.pool_allocator.destroy(w);
 }
 
 pub fn handle(self: *BaseConnection, buffer: []const u8) !void {
@@ -65,11 +67,13 @@ pub fn handle(self: *BaseConnection, buffer: []const u8) !void {
 pub fn handleAck(self: *BaseConnection, buffer: []const u8) !void {
     _ = self; // autofix
     _ = buffer; // autofix
+    // Remove from memory_window
 }
 
 pub fn handleNack(self: *BaseConnection, buffer: []const u8) !void {
     _ = self; // autofix
     _ = buffer; // autofix
+    // pop from memory_window, and resent
 }
 
 pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
