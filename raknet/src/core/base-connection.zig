@@ -5,6 +5,7 @@ const IndexableQueue = @import("../24/root.zig").IndexableQueue;
 const Indexable = @import("../24/root.zig").Indexable;
 const common = @import("../common/root.zig");
 const Reader = common.Reader;
+const Writer = common.Writer;
 const binary = common.binary;
 const CONSTANTS = @import("../constants.zig");
 const raknet = @import("../data/root.zig");
@@ -19,6 +20,7 @@ const ReliabilityIndexableBitQueue = IndexableBitQueue(CONSTANTS.UNACKNOWLEDGED_
 const ORDERED_CHANNELS_COUNT = 32;
 const PARALLEL_FRAGMENT_REBUILDERS = 32;
 
+io: *const std.Io,
 endpoint: Endpoint,
 guid: u64,
 connection_state: ConnectionState = .Unconnected,
@@ -32,8 +34,9 @@ incomingOrderChannels: [ORDERED_CHANNELS_COUNT]?*IndexableQueue(?*[]const u8, 20
 // Store window for FrameSet that weren't acknowledged
 memory_window: [CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE]?*const raknet.datagram.Capsule,
 
-pub fn init(self: *BaseConnection, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
+pub fn init(self: *BaseConnection, io: *const std.Io, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
     self.* = .{
+        .io = io,
         .guid = guid,
         .endpoint = endpoint,
         .connection_state = .Unconnected,
@@ -84,7 +87,8 @@ pub fn handle(self: *BaseConnection, buffer: []const u8) !void {
 
     try handleFrameSet(self, buffer);
 }
-pub fn handleAck(self: *BaseConnection, buffer: []const u8) !void {
+
+fn handleAck(self: *BaseConnection, buffer: []const u8) !void {
     _ = self; // autofix
 
     var reader: Reader = .init(buffer, 1);
@@ -103,7 +107,7 @@ pub fn handleAck(self: *BaseConnection, buffer: []const u8) !void {
     // Remove from memory_window
 }
 
-pub fn handleNack(self: *BaseConnection, buffer: []const u8) !void {
+fn handleNack(self: *BaseConnection, buffer: []const u8) !void {
     _ = self; // autofix
 
     var reader: Reader = .init(buffer, 1);
@@ -121,7 +125,7 @@ pub fn handleNack(self: *BaseConnection, buffer: []const u8) !void {
     // pop from memory_window, and resent
 }
 
-pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
+fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     var reader: Reader = .init(buffer, 1);
     try reader.assert(3);
     const sequence_index: u32 = binary.readU24LE(&reader);
@@ -175,12 +179,15 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // gets optimized away
     var capsule: raknet.datagram.Capsule = undefined;
     while (reader.remaining() > 0) {
-        capsule.read(&reader) catch {};
+        capsule.read(&reader) catch continue;
         std.log.info("CAPSULE; Reliability: {}, data: {any}", .{ capsule.reliability, capsule.body });
-        handleFrame(self, &capsule) catch {};
+        handleFrame(self, &capsule) catch continue;
     }
+
+    try updateAcknowledge(self);
 }
-pub fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
+
+fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
     std.log.info("Reliability: {}", .{capsule.reliability});
     // f*ck it, just ignore this sus connection behavior
     if (capsule.reliability.isSequencedOrdered() and capsule.orderChannel > ORDERED_CHANNELS_COUNT)
@@ -194,14 +201,15 @@ pub fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !vo
         // We are missing too many packets to recover the connection
         // or we got old packet thats too old
         if (hole > self.incomingReliabilityIndexBitSet.capacity or hole < (self.incomingReliabilityIndexBitSet.capacity -% ReliabilityIndexableBitQueue.RANGE))
-            return error.OutOfWindowBounds;
+            return;
 
         // reserve the space
         if (hole >= 0)
             self.incomingReliabilityIndexBitSet.reserve(capsule.reliableIndex)
             // duplicate
-        else if (self.incomingReliabilityIndexBitSet.getValue(capsule.reliableIndex))
+        else if (self.incomingReliabilityIndexBitSet.getValue(capsule.reliableIndex)) {
             return;
+        }
 
         self.incomingReliabilityIndexBitSet.setValue(capsule.reliableIndex, true);
         // We got packet as expected
@@ -275,7 +283,7 @@ pub fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !vo
     }
 }
 
-pub fn reassemble(self: *BaseConnection, ptr: **raknet.datagram.Capsule) bool {
+fn reassemble(self: *BaseConnection, ptr: **raknet.datagram.Capsule) bool {
     const capsule = ptr.*;
     const index: usize = @as(usize, @intCast(capsule.fragment_data.?.id)) % self.incomingFragments.len;
     var ref = &self.incomingFragments[index];
@@ -299,3 +307,42 @@ pub fn reassemble(self: *BaseConnection, ptr: **raknet.datagram.Capsule) bool {
 // const body = self.pool_allocator.remaining(FrameSet.CapsuleInfo, capsule)[0..capsule.body.len];
 // @memcpy(body, capsule.body);
 // capsule.body = body;
+
+fn updateAcknowledge(self: *BaseConnection) !void {
+    var ack_buffer: [1024]u8 = undefined;
+    var nack_buffer: [1024]u8 = undefined;
+
+    var ack_writer: Writer = .init(&ack_buffer, 0);
+    var ack_count: usize = 0;
+    ack_writer.writeByte(raknet.datagram.ACKNOWLEDGE_PACKED_ID);
+    ack_writer.skip(2);
+
+    var nack_writer: Writer = .init(&nack_buffer, 0);
+    var nack_count: usize = 0;
+    nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
+    nack_writer.skip(2);
+
+    var iterator = self.incomingAcknowledgeQueue.iterator();
+    while (iterator.next()) |range| {
+        const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
+        const counter: *usize = if (range.bit) &ack_count else &nack_count;
+        counter.* = counter.* + 1;
+        try binary.writeRange(writer, .{
+            .min = range.tail,
+            .max = range.head -% 1,
+        });
+    }
+
+    const ack = ack_writer.getProcessedBytes();
+    const nack = nack_writer.getProcessedBytes();
+    ack_writer.pointer = 1;
+    ack_writer.writeInt(u16, @intCast(ack_count), .big);
+    nack_writer.pointer = 1;
+    nack_writer.writeInt(u16, @intCast(nack_count), .big);
+    if (ack.len > 3)
+        try self.endpoint.source.send(self.io.*, &self.endpoint.address, ack);
+    if (nack.len > 3)
+        try self.endpoint.source.send(self.io.*, &self.endpoint.address, nack);
+
+    self.incomingAcknowledgeQueue.clear();
+}

@@ -12,6 +12,7 @@ pub fn init(self: *ClientConnection, endpoint: *const Endpoint, listener: *Serve
         .base_connection = undefined,
     };
     try self.base_connection.init(
+        listener.io,
         endpoint.*,
         guid,
         &listener.pool_allocator,

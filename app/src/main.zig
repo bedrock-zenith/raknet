@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     const socket = try bind_address.bind(io, .{ .mode = .dgram });
 
     var listener: Listener = undefined;
-    try listener.init(init.io, init.gpa);
+    try listener.init(&init.io, init.gpa);
 
     const motd = try std.fmt.allocPrint(init.gpa, "MCPE;Dedicated Server;527;1.19.1;0;10;{d};Bedrock level;Survival;1;", .{listener.guid});
     defer init.gpa.free(motd);

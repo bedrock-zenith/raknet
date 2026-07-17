@@ -225,16 +225,16 @@ pub inline fn readU24LE(reader: *common.Reader) u32 {
     return @intCast(raw);
 }
 pub inline fn writeU24LE(writer: *common.Writer, value: u32) void {
-    write(u24, writer, &value) catch unreachable;
+    write(u24, writer, &@intCast(value)) catch unreachable;
 }
 
-pub inline fn writeRange(cursor: *common.Writer, value: *const raknet.AckRange) !void {
-    cursor.assert(4);
+pub inline fn writeRange(cursor: *common.Writer, value: raknet.AckRange) !void {
+    try cursor.assert(4);
     cursor.writeByte(if (value.min == value.max) 1 else 0);
     writeU24LE(cursor, value.min);
 
     if (value.min != value.max) {
-        cursor.assert(3);
+        try cursor.assert(3);
         writeU24LE(cursor, value.max);
     }
 }

@@ -16,14 +16,14 @@ const FramePool = @import("root.zig").FramePool;
 const Server = @This();
 
 guid: u64,
-io: std.Io,
+io: *const std.Io,
 allocator: std.mem.Allocator,
 connections: std.AutoHashMap(IpAddress, *ClientConnection),
 pool_allocator: FramePool,
 motd: []const u8,
 secret_key: [16]u8,
 
-pub fn init(server: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
+pub fn init(server: *Server, io: *const std.Io, allocator: std.mem.Allocator) !void {
     var xiro = std.Random.Xoroshiro128.init(undefined);
     server.* = .{
         .io = io,
@@ -34,7 +34,7 @@ pub fn init(server: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
         .motd = "",
         .secret_key = undefined,
     };
-    try std.Io.randomSecure(io, &server.secret_key);
+    try std.Io.randomSecure(io.*, &server.secret_key);
 }
 
 pub fn optimze(self: *Server) void {
@@ -171,7 +171,7 @@ inline fn sendPacket(self: *const Server, endpoint: *const Endpoint, comptime T:
     writer.writeByte(@intFromEnum(T.PacketId));
     try meta.writeAsserted(T, &writer, value);
 
-    try endpoint.source.send(self.io, &endpoint.address, writer.getProcessedBytes());
+    try endpoint.source.send(self.io.*, &endpoint.address, writer.getProcessedBytes());
 }
 
 inline fn readPacket(buffer: []const u8, comptime T: type) !T {
