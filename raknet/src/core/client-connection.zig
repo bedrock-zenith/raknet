@@ -1,20 +1,21 @@
-pub const Endpoint = @import("../common/endpoint.zig");
 const BaseConnection = @import("./base-connection.zig");
-const Listener = @import("./listener.zig");
+pub const Endpoint = @import("endpoint.zig");
+const Server = @import("server.zig");
 
 const ClientConnection = @This();
 base_connection: BaseConnection,
-listener: *Listener,
+listener: *Server,
 
-pub fn init(endpoint: *const Endpoint, listener: *Listener, guid: u64) !ClientConnection {
-    return .{
+pub fn init(self: *ClientConnection, endpoint: *const Endpoint, listener: *Server, guid: u64) !void {
+    self.* = .{
         .listener = listener,
-        .base_connection = try .init(
-            endpoint.*,
-            guid,
-            &listener.pool_allocator,
-        ),
+        .base_connection = undefined,
     };
+    try self.base_connection.init(
+        endpoint.*,
+        guid,
+        &listener.pool_allocator,
+    );
 }
 
 pub fn deinit(self: *ClientConnection) void {

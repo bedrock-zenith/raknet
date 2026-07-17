@@ -1,4 +1,5 @@
 {
+   "tab_size": 4,
    "languages": {
       "Zig": {
          "code_actions_on_format": {

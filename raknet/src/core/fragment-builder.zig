@@ -1,16 +1,16 @@
 const std = @import("std");
 
-const CapsuleInfo = @import("../packets/online/frame-set.zig").CapsuleInfo;
+const Capsule = @import("../data/root.zig").datagram.Capsule;
 
 count: u32 = 0,
 buffer_size: u32 = 0,
-first: ?*CapsuleInfo = null,
-last: ?*CapsuleInfo = null,
+first: ?*Capsule = null,
+last: ?*Capsule = null,
 pub const empty: @This() = .{};
 
-pub fn append(self: *@This(), capsule: *CapsuleInfo) bool {
-    var meta = &(capsule.fragment_data orelse return false);
-    meta.next = null;
+pub fn append(self: *@This(), capsule: *Capsule) bool {
+    const meta = &(capsule.fragment_data orelse return false);
+    capsule.next = null;
 
     // So the self.last is just an checkpoint in the linked list
     // where anything from first to last is contiguous fragments where next.index == this.index + 1;
@@ -20,30 +20,30 @@ pub fn append(self: *@This(), capsule: *CapsuleInfo) bool {
     if (meta.index == 0) {
         if (self.first != null) return false;
         self.first = capsule;
-        meta.next = self.last;
+        capsule.next = self.last;
         self.last = capsule;
     } else {
-        var last_ptr: *?*CapsuleInfo = if (self.first) |_| &self.last.?.fragment_data.?.next else &self.last;
-        var cursor: ?*CapsuleInfo = last_ptr.*;
+        var last_ptr: *?*Capsule = if (self.first) |_| &self.last.?.next else &self.last;
+        var cursor: ?*Capsule = last_ptr.*;
 
         while (cursor) |ptr| {
             if (ptr.fragment_data.?.index == meta.index) return false;
             if (ptr.fragment_data.?.index > meta.index) break;
 
-            last_ptr = &ptr.fragment_data.?.next;
-            cursor = ptr.fragment_data.?.next;
+            last_ptr = &ptr.next;
+            cursor = ptr.next;
         }
 
-        capsule.fragment_data.?.next = cursor;
+        capsule.next = cursor;
         last_ptr.* = capsule;
     }
 
     self.count += 1;
-    self.buffer_size += capsule.body.len;
+    self.buffer_size += @intCast(capsule.body.len);
 
     if (self.first != null)
         while (self.last) |last| {
-            if (last.fragment_data.?.next) |next_node| {
+            if (last.next) |next_node| {
                 if (last.fragment_data.?.index + 1 == next_node.fragment_data.?.index) {
                     self.last = next_node;
                     continue;
@@ -56,8 +56,8 @@ pub fn append(self: *@This(), capsule: *CapsuleInfo) bool {
 }
 
 pub inline fn iterator(self: *@This()) struct {
-    cursor: ?*CapsuleInfo = null,
-    pub inline fn next(this: *@This()) ?*CapsuleInfo {
+    cursor: ?*Capsule = null,
+    pub inline fn next(this: *@This()) ?*Capsule {
         if (this.cursor) |c| {
             this.cursor = c.fragment_data.?.next;
             return c;
