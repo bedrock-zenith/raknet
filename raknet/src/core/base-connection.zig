@@ -125,7 +125,8 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     var reader: Reader = .init(buffer, 1);
     try reader.assert(3);
     const sequence_index: u32 = binary.readU24LE(&reader);
-    std.log.info("SequenceIndex: {}", .{sequence_index});
+    std.log.info("---------------------------------", .{});
+    std.log.info("SequenceIndex: {}, size: {}", .{ sequence_index, buffer.len });
 
     const last_sequence_index = Indexable.fixed(self.incomingAcknowledgeQueue.head -% 1);
     const distance = Indexable.distance(last_sequence_index, sequence_index);
@@ -135,6 +136,7 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     //
     // ref: BitRingBuffer.reserve first assert
     if (distance > self.incomingAcknowledgeQueue.capacity) {
+        std.log.err("Capacity fail: ", .{});
         //TODO:
         return;
     }
@@ -142,7 +144,12 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // late packets, late packets also covers old duplicates
     //
     // ref: BitRingBuffer.@etValue first assert sequenceIndex >= tail
-    if (distance +% @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity)) < SequencedIndexableBitQueue.RANGE) {
+    if (distance < @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity -% SequencedIndexableBitQueue.RANGE))) {
+        std.log.err("BitRingBuffer.@etValue first assert sequenceIndex >= tail, d: {}, {}, {}", .{
+            distance,
+            self.incomingAcknowledgeQueue,
+            @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity -% SequencedIndexableBitQueue.RANGE)),
+        });
         return;
     }
 
@@ -168,46 +175,49 @@ pub fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // gets optimized away
     var capsule: raknet.datagram.Capsule = undefined;
     while (reader.remaining() > 0) {
-        try capsule.read(&reader);
-
+        capsule.read(&reader) catch {};
         std.log.info("CAPSULE; Reliability: {}, data: {any}", .{ capsule.reliability, capsule.body });
-        try handleFrame(self, &capsule);
+        handleFrame(self, &capsule) catch {};
     }
 }
 pub fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
+    std.log.info("Reliability: {}", .{capsule.reliability});
     // f*ck it, just ignore this sus connection behavior
     if (capsule.reliability.isSequencedOrdered() and capsule.orderChannel > ORDERED_CHANNELS_COUNT)
         return error.RakNetOrderChannelOutOfBounds;
 
+    std.log.info("ReliabilityIndex: {}", .{capsule.reliableIndex});
+
     if (capsule.reliability.isReliable()) {
         const hole = Indexable.distance(capsule.reliableIndex, self.incomingReliabilityIndexBitSet.head);
+
+        // We are missing too many packets to recover the connection
+        // or we got old packet thats too old
+        if (hole > self.incomingReliabilityIndexBitSet.capacity or hole < (self.incomingReliabilityIndexBitSet.capacity -% ReliabilityIndexableBitQueue.RANGE))
+            return error.OutOfWindowBounds;
+
+        // reserve the space
+        if (hole >= 0)
+            self.incomingReliabilityIndexBitSet.reserve(capsule.reliableIndex)
+            // duplicate
+        else if (self.incomingReliabilityIndexBitSet.getValue(capsule.reliableIndex))
+            return;
+
+        self.incomingReliabilityIndexBitSet.setValue(capsule.reliableIndex, true);
         // We got packet as expected
         if (hole == 0) {
             @branchHint(.likely);
             self.incomingReliabilityIndexBitSet.head += 1;
             self.incomingReliabilityIndexBitSet.tail += 1;
-            self.incomingReliabilityIndexBitSet.setValue(capsule.reliableIndex, true);
-        }
-
-        // We are missing too many packets to recover the connection
-        // or we got old packet thats too old
-        else if (hole > self.incomingReliabilityIndexBitSet.capacity or hole < (self.incomingReliabilityIndexBitSet.capacity - ReliabilityIndexableBitQueue.RANGE))
-            return error.OutOfWindowBounds
-
-            // We simply ignore duplicates
-        else if (self.incomingReliabilityIndexBitSet.getValue(capsule.reliableIndex)) return else {
-            if (hole > 0) self.incomingReliabilityIndexBitSet.reserve(capsule.reliableIndex);
-            self.incomingReliabilityIndexBitSet.setValue(capsule.reliableIndex, true);
-            if (capsule.reliableIndex == self.incomingReliabilityIndexBitSet.tail) {
-                var iterator = self.incomingReliabilityIndexBitSet.iterator();
-                // We check if first range is bit set true in that case we can safely move the tail
-                if (iterator.next()) |range|
-                    if (range.bit) {
-                        const size = Indexable.distance(range.tail, range.head);
-                        self.incomingReliabilityIndexBitSet.tail +%= @bitCast(size);
-                        self.incomingReliabilityIndexBitSet.capacity +%= @bitCast(size);
-                    };
-            }
+        } else if (capsule.reliableIndex == self.incomingReliabilityIndexBitSet.tail) {
+            var iterator = self.incomingReliabilityIndexBitSet.iterator();
+            // We check if first range is bit set true in that case we can safely move the tail
+            if (iterator.next()) |range|
+                if (range.bit) {
+                    const size = Indexable.distance(range.tail, range.head);
+                    self.incomingReliabilityIndexBitSet.tail +%= @bitCast(size);
+                    self.incomingReliabilityIndexBitSet.capacity +%= @bitCast(size);
+                };
         }
     }
 
