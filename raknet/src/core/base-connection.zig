@@ -19,20 +19,24 @@ const SequencedIndexableBitQueue = IndexableBitQueue(CONSTANTS.UNACKNOWLEDGED_WI
 const ReliabilityIndexableBitQueue = IndexableBitQueue(CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE * 4);
 const ORDERED_CHANNELS_COUNT = 32;
 const PARALLEL_FRAGMENT_REBUILDERS = 32;
+const DQueue = std.Deque(*const raknet.datagram.Capsule);
 
 io: *const std.Io,
 endpoint: Endpoint,
 guid: u64,
 connection_state: ConnectionState = .Unconnected,
 pool_allocator: *PoolAllocator,
-incomingAcknowledgeQueue: SequencedIndexableBitQueue,
-incomingFragments: [PARALLEL_FRAGMENT_REBUILDERS]FragmentBuilder,
-incomingHighestSequenceIndexes: [ORDERED_CHANNELS_COUNT]u32,
-incomingOrderingIndexes: [ORDERED_CHANNELS_COUNT]u32,
-incomingReliabilityIndexBitSet: ReliabilityIndexableBitQueue,
-incomingOrderChannels: [ORDERED_CHANNELS_COUNT]?*IndexableQueue(?*[]const u8, 2048, null),
+incoming_acknowledge_queue: SequencedIndexableBitQueue,
+incoming_fragments: [PARALLEL_FRAGMENT_REBUILDERS]FragmentBuilder,
+incoming_highest_sequence_indexes: [ORDERED_CHANNELS_COUNT]u32,
+incoming_ordering_indexes: [ORDERED_CHANNELS_COUNT]u32,
+incoming_reliability_index_bit_set: ReliabilityIndexableBitQueue,
+incoming_order_channels: [ORDERED_CHANNELS_COUNT]?*IndexableQueue(?*[]const u8, 2048, null),
+
 // Store window for FrameSet that weren't acknowledged
 memory_window: [CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE]?*const raknet.datagram.Capsule,
+send_queue: DQueue,
+outgoing_sequence_index: u32,
 
 pub fn init(self: *BaseConnection, io: *const std.Io, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
     self.* = .{
@@ -40,26 +44,30 @@ pub fn init(self: *BaseConnection, io: *const std.Io, endpoint: Endpoint, guid: 
         .guid = guid,
         .endpoint = endpoint,
         .connection_state = .Unconnected,
-        .incomingAcknowledgeQueue = .{},
+        .incoming_acknowledge_queue = .{},
         .pool_allocator = pool,
-        .incomingFragments = @splat(.empty),
+        .incoming_fragments = @splat(.empty),
         .memory_window = @splat(null),
-        .incomingHighestSequenceIndexes = @splat(0),
-        .incomingOrderChannels = @splat(null),
-        .incomingOrderingIndexes = @splat(0),
-        .incomingReliabilityIndexBitSet = .{},
+        .incoming_highest_sequence_indexes = @splat(0),
+        .incoming_order_channels = @splat(null),
+        .incoming_ordering_indexes = @splat(0),
+        .incoming_reliability_index_bit_set = .{},
+        .send_queue = undefined,
     };
 
-    //@memset(self.incomingFragments, .empty);
-    //@memset(self.memory_window, null);
-    //@memset(self.incomingOrderChannels, null);
+    const buffer = try pool.alloc(*const raknet.datagram.Capsule);
+    // In case of failed initialization we free the allocated memory
+    errdefer pool.destroy(buffer);
+    self.send_queue = .initBuffer(buffer[0..]);
 }
 
 pub fn deinit(self: *BaseConnection) void {
     self.connection_state = .Disconnected;
+    self.pool_allocator.destroy(self.send_queue.buffer);
+
     // Do not deallocate anything that wasn't allocated in BaseConnection
     // Clean up any unprocessed fragments
-    for (self.incomingFragments) |*v| {
+    for (self.incoming_fragments) |*v| {
         var iterator = v.iterator();
         while (iterator.next()) |c|
             self.pool_allocator.destroy(c);
@@ -70,8 +78,10 @@ pub fn deinit(self: *BaseConnection) void {
 }
 
 pub fn handle(self: *BaseConnection, buffer: []const u8) !void {
-    @branchHint(.unlikely);
-    if (self.connection_state == .Disconnected) return;
+    if (self.connection_state == .Disconnected) {
+        @branchHint(.cold);
+        return;
+    }
 
     // Ack
     if (buffer[0] & raknet.datagram.ACKNOWLEDGE_BIT_MASK != 0) {
@@ -132,14 +142,14 @@ fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     std.log.info("---------------------------------", .{});
     std.log.info("SequenceIndex: {}, size: {}", .{ sequence_index, buffer.len });
 
-    const last_sequence_index = Indexable.fixed(self.incomingAcknowledgeQueue.head -% 1);
+    const last_sequence_index = Indexable.fixed(self.incoming_acknowledge_queue.head -% 1);
     const distance = Indexable.distance(last_sequence_index, sequence_index);
 
     // we have probably lost more packets than even client it self remembers
     // in that case we just notify disconnect, and remove this connection
     //
     // ref: BitRingBuffer.reserve first assert
-    if (distance > self.incomingAcknowledgeQueue.capacity) {
+    if (distance > self.incoming_acknowledge_queue.capacity) {
         std.log.err("Capacity fail: ", .{});
         //TODO:
         return;
@@ -148,11 +158,11 @@ fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // late packets, late packets also covers old duplicates
     //
     // ref: BitRingBuffer.@etValue first assert sequenceIndex >= tail
-    if (distance < @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity -% SequencedIndexableBitQueue.RANGE))) {
+    if (distance < @as(i32, @bitCast(self.incoming_acknowledge_queue.capacity -% SequencedIndexableBitQueue.RANGE))) {
         std.log.err("BitRingBuffer.@etValue first assert sequenceIndex >= tail, d: {}, {}, {}", .{
             distance,
-            self.incomingAcknowledgeQueue,
-            @as(i32, @bitCast(self.incomingAcknowledgeQueue.capacity -% SequencedIndexableBitQueue.RANGE)),
+            self.incoming_acknowledge_queue,
+            @as(i32, @bitCast(self.incoming_acknowledge_queue.capacity -% SequencedIndexableBitQueue.RANGE)),
         });
         return;
     }
@@ -161,7 +171,7 @@ fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     //
     // ref: BitRingBuffer.@etValue second assert sequenceIndex < head
     if (distance <= 0)
-        if (self.incomingAcknowledgeQueue.getValue(sequence_index))
+        if (self.incoming_acknowledge_queue.getValue(sequence_index))
             return;
 
     // 2 -> 5, 2 packets lost
@@ -169,12 +179,12 @@ fn handleFrameSet(self: *BaseConnection, buffer: []const u8) !void {
     // ref: BitRingBuffer.reserve second assert sIndex >= head
     if (distance > 0)
         // This call already sets other bits to zero, meaning the packets were lost
-        self.incomingAcknowledgeQueue.reserve(sequence_index);
+        self.incoming_acknowledge_queue.reserve(sequence_index);
 
     // Set this frame-set as received
     //
     // ref: BitRingBuffer.@etValue second assert, head = sequenceIndex + 1 => sequenceIndex < head
-    self.incomingAcknowledgeQueue.setValue(sequence_index, true);
+    self.incoming_acknowledge_queue.setValue(sequence_index, true);
 
     // gets optimized away
     var capsule: raknet.datagram.Capsule = undefined;
@@ -196,35 +206,35 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
     std.log.info("ReliabilityIndex: {}", .{capsule.reliableIndex});
 
     if (capsule.reliability.isReliable()) {
-        const hole = Indexable.distance(capsule.reliableIndex, self.incomingReliabilityIndexBitSet.head);
+        const hole = Indexable.distance(capsule.reliableIndex, self.incoming_reliability_index_bit_set.head);
 
         // We are missing too many packets to recover the connection
         // or we got old packet thats too old
-        if (hole > self.incomingReliabilityIndexBitSet.capacity or hole < (self.incomingReliabilityIndexBitSet.capacity -% ReliabilityIndexableBitQueue.RANGE))
+        if (hole > self.incoming_reliability_index_bit_set.capacity or hole < (self.incoming_reliability_index_bit_set.capacity -% ReliabilityIndexableBitQueue.RANGE))
             return;
 
         // reserve the space
         if (hole >= 0)
-            self.incomingReliabilityIndexBitSet.reserve(capsule.reliableIndex)
+            self.incoming_reliability_index_bit_set.reserve(capsule.reliableIndex)
             // duplicate
-        else if (self.incomingReliabilityIndexBitSet.getValue(capsule.reliableIndex)) {
+        else if (self.incoming_reliability_index_bit_set.getValue(capsule.reliableIndex)) {
             return;
         }
 
-        self.incomingReliabilityIndexBitSet.setValue(capsule.reliableIndex, true);
+        self.incoming_reliability_index_bit_set.setValue(capsule.reliableIndex, true);
         // We got packet as expected
         if (hole == 0) {
             @branchHint(.likely);
-            self.incomingReliabilityIndexBitSet.head += 1;
-            self.incomingReliabilityIndexBitSet.tail += 1;
-        } else if (capsule.reliableIndex == self.incomingReliabilityIndexBitSet.tail) {
-            var iterator = self.incomingReliabilityIndexBitSet.iterator();
+            self.incoming_reliability_index_bit_set.head += 1;
+            self.incoming_reliability_index_bit_set.tail += 1;
+        } else if (capsule.reliableIndex == self.incoming_reliability_index_bit_set.tail) {
+            var iterator = self.incoming_reliability_index_bit_set.iterator();
             // We check if first range is bit set true in that case we can safely move the tail
             if (iterator.next()) |range|
                 if (range.bit) {
                     const size = Indexable.distance(range.tail, range.head);
-                    self.incomingReliabilityIndexBitSet.tail +%= @bitCast(size);
-                    self.incomingReliabilityIndexBitSet.capacity +%= @bitCast(size);
+                    self.incoming_reliability_index_bit_set.tail +%= @bitCast(size);
+                    self.incoming_reliability_index_bit_set.capacity +%= @bitCast(size);
                 };
         }
     }
@@ -238,20 +248,20 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
     _ = allocated; // autofix
 
     if (ref.reliability.isSequencedOrdered()) {
-        const order_distance = Indexable.distance(self.incomingOrderingIndexes[ref.orderChannel], ref.orderingIndex);
+        const order_distance = Indexable.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex);
         if (order_distance == 0) {
             if (ref.reliability.isSequenced()) {
                 // basically discard any older packets
-                if (Indexable.distance(self.incomingOrderingIndexes[ref.orderChannel], ref.orderingIndex) >= 0) {
-                    self.incomingHighestSequenceIndexes[ref.orderChannel] = ref.sequenceIndex + 1;
+                if (Indexable.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex) >= 0) {
+                    self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex + 1;
                     //TODO: Push packet to receive queue
                 }
                 return;
             }
 
             //ref: Source\ReliabilityLayer.cpp:1372
-            self.incomingOrderingIndexes[ref.orderChannel] = Indexable.fixed(ref.orderingIndex + 1);
-            self.incomingHighestSequenceIndexes[ref.orderChannel] = 0;
+            self.incoming_ordering_indexes[ref.orderChannel] = Indexable.fixed(ref.orderingIndex + 1);
+            self.incoming_highest_sequence_indexes[ref.orderChannel] = 0;
 
             // Handle the packet
             // HandlePayload(data);
@@ -270,14 +280,14 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
     }
 
     if (ref.reliability.isSequenced()) {
-        if (Indexable.distance(self.incomingOrderingIndexes[ref.orderChannel], ref.orderingIndex) < 0)
+        if (Indexable.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex) < 0)
             return;
 
-        if (ref.sequenceIndex < self.incomingHighestSequenceIndexes[ref.orderChannel] or
-            ref.orderingIndex < self.incomingOrderingIndexes[ref.orderChannel])
+        if (ref.sequenceIndex < self.incoming_highest_sequence_indexes[ref.orderChannel] or
+            ref.orderingIndex < self.incoming_ordering_indexes[ref.orderChannel])
             return;
 
-        self.incomingHighestSequenceIndexes[ref.orderChannel] = ref.sequenceIndex + 1;
+        self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex + 1;
         //HandlePayload(data);
         return;
     }
@@ -285,8 +295,8 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
 
 fn reassemble(self: *BaseConnection, ptr: **raknet.datagram.Capsule) bool {
     const capsule = ptr.*;
-    const index: usize = @as(usize, @intCast(capsule.fragment_data.?.id)) % self.incomingFragments.len;
-    var ref = &self.incomingFragments[index];
+    const index: usize = @as(usize, @intCast(capsule.fragment_data.?.id)) % self.incoming_fragments.len;
+    var ref = &self.incoming_fragments[index];
     if (ref.last) |l| {
         if (l.fragment_data.?.id != capsule.fragment_data.?.id)
             std.debug.panic("TODO: fragments array buffer overflow, should we close the connection??", .{});
@@ -322,7 +332,7 @@ fn updateAcknowledge(self: *BaseConnection) !void {
     nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
     nack_writer.skip(2);
 
-    var iterator = self.incomingAcknowledgeQueue.iterator();
+    var iterator = self.incoming_acknowledge_queue.iterator();
     while (iterator.next()) |range| {
         const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
         const counter: *usize = if (range.bit) &ack_count else &nack_count;
@@ -344,5 +354,5 @@ fn updateAcknowledge(self: *BaseConnection) !void {
     if (nack.len > 3)
         try self.endpoint.source.send(self.io.*, &self.endpoint.address, nack);
 
-    self.incomingAcknowledgeQueue.clear();
+    self.incoming_acknowledge_queue.clear();
 }

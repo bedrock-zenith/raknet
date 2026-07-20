@@ -11,6 +11,7 @@ pub inline fn writeAsserted(comptime T: type, cursor: *common.Writer, value: *co
         try write(T, cursor, value);
     }
 }
+
 pub inline fn readAsserted(comptime T: type, cursor: *common.Reader, value: *T) !void {
     if (sizeof(T)) |size| {
         try cursor.assert(size);
@@ -19,6 +20,7 @@ pub inline fn readAsserted(comptime T: type, cursor: *common.Reader, value: *T) 
         try read(T, cursor, value);
     }
 }
+
 pub inline fn write(comptime T: type, cursor: *common.Writer, value: *const T) !void {
     const type_info = @typeInfo(T);
     switch (type_info) {
@@ -224,6 +226,7 @@ pub inline fn readU24LE(reader: *common.Reader) u32 {
     read(u24, reader, &raw) catch unreachable;
     return @intCast(raw);
 }
+
 pub inline fn writeU24LE(writer: *common.Writer, value: u32) void {
     write(u24, writer, &@intCast(value)) catch unreachable;
 }

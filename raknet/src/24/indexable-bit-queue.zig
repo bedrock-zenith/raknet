@@ -7,6 +7,7 @@ pub fn IndexableBitQueue(comptime range: comptime_int) type {
         if (!std.math.isPowerOfTwo(range))
             @compileError("UNACKNOWLEDGED_WINDOWS_SIZE must be a power of two for BitRingBuffer optimization.");
     }
+
     const BitSet = std.bit_set.ArrayBitSet(usize, range);
     return struct {
         const Indexable = @This();
