@@ -12,8 +12,10 @@ const offline_packet = @import("../data/root.zig").offline;
 pub const ClientConnection = @import("client-connection.zig");
 const Endpoint = @import("endpoint.zig");
 const FramePool = @import("root.zig").FramePool;
+pub const ServerEvent = @import("server-events.zig").ServerEvent;
 
 const Server = @This();
+const ServerEventQueue = std.Deque(ServerEvent);
 
 guid: u64,
 io: *const std.Io,
@@ -22,10 +24,11 @@ connections: std.AutoHashMap(IpAddress, *ClientConnection),
 pool_allocator: FramePool,
 motd: []const u8,
 secret_key: [16]u8,
+server_events: ServerEventQueue,
 
-pub fn init(server: *Server, io: *const std.Io, allocator: std.mem.Allocator) !void {
+pub fn init(self: *Server, io: *const std.Io, allocator: std.mem.Allocator) !void {
     var xiro = std.Random.Xoroshiro128.init(undefined);
-    server.* = .{
+    self.* = .{
         .io = io,
         .allocator = allocator,
         .guid = xiro.next(),
@@ -33,8 +36,11 @@ pub fn init(server: *Server, io: *const std.Io, allocator: std.mem.Allocator) !v
         .pool_allocator = try .init(allocator), // 131072
         .motd = "",
         .secret_key = undefined,
+        .server_events = undefined,
     };
-    try std.Io.randomSecure(io.*, &server.secret_key);
+    self.server_events = try .initCapacity(allocator, 128);
+    errdefer self.server_events.deinit(allocator);
+    try std.Io.randomSecure(io.*, &self.secret_key);
 }
 
 pub fn optimze(self: *Server) void {
@@ -42,6 +48,7 @@ pub fn optimze(self: *Server) void {
 }
 
 pub fn deinit(self: *Server) void {
+    self.server_events.deinit(self.allocator);
     self.frame_pool.deinit(self.allocator);
 
     var iterator = self.connections.valueIterator();

@@ -21,6 +21,13 @@ const ORDERED_CHANNELS_COUNT = 32;
 const PARALLEL_FRAGMENT_REBUILDERS = 32;
 const DQueue = std.Deque(*const raknet.datagram.Capsule);
 
+// Max 127 unordered packets
+const MinHeap = @import("../24/root.zig").MinHeap(*raknet.datagram.Capsule, 127);
+comptime {
+    if (@sizeOf(MinHeap) > PoolAllocator.PAGE_SIZE)
+        @compileError("MinHeap doesn't fits the pool allocator");
+}
+
 io: *const std.Io,
 endpoint: Endpoint,
 guid: u64,
@@ -31,12 +38,12 @@ incoming_fragments: [PARALLEL_FRAGMENT_REBUILDERS]FragmentBuilder,
 incoming_highest_sequence_indexes: [ORDERED_CHANNELS_COUNT]u32,
 incoming_ordering_indexes: [ORDERED_CHANNELS_COUNT]u32,
 incoming_reliability_index_bit_set: ReliabilityIndexableBitQueue,
-incoming_order_channels: [ORDERED_CHANNELS_COUNT]?*IndexableQueue(?*[]const u8, 2048, null),
+incoming_order_channels: [ORDERED_CHANNELS_COUNT]?*MinHeap,
 
 // Store window for FrameSet that weren't acknowledged
 memory_window: [CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE]?*const raknet.datagram.Capsule,
 send_queue: DQueue,
-outgoing_sequence_index: u32,
+outgoing_sequence_index: u32 = 0,
 
 pub fn init(self: *BaseConnection, io: *const std.Io, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
     self.* = .{
@@ -214,14 +221,14 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
             return;
 
         // reserve the space
-        if (hole >= 0)
-            self.incoming_reliability_index_bit_set.reserve(capsule.reliableIndex)
+        if (hole >= 0) {
+            self.incoming_reliability_index_bit_set.reserve(capsule.reliableIndex);
+        } else if (self.incoming_reliability_index_bit_set.getValue(capsule.reliableIndex)) {
             // duplicate
-        else if (self.incoming_reliability_index_bit_set.getValue(capsule.reliableIndex)) {
             return;
         }
-
         self.incoming_reliability_index_bit_set.setValue(capsule.reliableIndex, true);
+
         // We got packet as expected
         if (hole == 0) {
             @branchHint(.likely);
@@ -249,8 +256,11 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
 
     if (ref.reliability.isSequencedOrdered()) {
         const order_distance = Indexable.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex);
+
+        //ref: Source\ReliabilityLayer.cpp:1282
         if (order_distance == 0) {
             if (ref.reliability.isSequenced()) {
+                // Do we have this implemented? check
                 // basically discard any older packets
                 if (Indexable.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex) >= 0) {
                     self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex + 1;
@@ -259,23 +269,39 @@ fn handleFrame(self: *BaseConnection, capsule: *raknet.datagram.Capsule) !void {
                 return;
             }
 
+            // 128  2048
+
             //ref: Source\ReliabilityLayer.cpp:1372
             self.incoming_ordering_indexes[ref.orderChannel] = Indexable.fixed(ref.orderingIndex + 1);
             self.incoming_highest_sequence_indexes[ref.orderChannel] = 0;
 
-            // Handle the packet
-            // HandlePayload(data);
-            // while (_incomingOutOfOrderBuffers.Remove(++index, out FragmentInfo info))
-            // {
-            //     HandlePayload(info.RentedBuffer.Span);
-            //     info.RentedBuffer.Dispose();
-            // }
-
-            // // Update the queue
-            // self.incomingOrderingIndexes[frame.OrderChannel] = (int)(index & 0b00000111_11111111_11111111_11111111);
+            const heap = self.incoming_order_channels[ref.orderChannel] orelse try self.pool_allocator.create(MinHeap);
+            while (heap.peek()) |compound| {
+                if (compound.order == self.incoming_ordering_indexes[ref.orderChannel]) {
+                    const data = heap.pop();
+                    _ = data; // autofix
+                    // TODO: push data to the send queue and deallocate
+                    //ref: Source\ReliabilityLayer.cpp:1416
+                    if (ref.reliability == .ReliableOrdered) {
+                        self.incoming_ordering_indexes[ref.orderChannel] = Indexable.fixed(ref.orderingIndex + 1);
+                    } else {
+                        self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex;
+                    }
+                } else break;
+            }
         } else if (order_distance > 0) {
-            // if (!_incomingOutOfOrderBuffers.TryAdd((uint)frame.OrderFrameIndex | ((uint)frame.OrderChannel << 27), new(frame, RentedBuffer.From(data))))
-            //     throw new Exception("Unexpected existance of Unordered memory buffer");
+            const heap = self.incoming_order_channels[ref.orderChannel] orelse try self.pool_allocator.create(MinHeap);
+            if (heap.len < heap.buffer.len) {
+                return error.HeapOutOfMemory;
+            }
+
+            // We need to allocate and safe the buffer
+            var new_capsule = try self.pool_allocator.create(raknet.datagram.Capsule);
+            new_capsule.* = ref.*;
+            new_capsule.body = self.pool_allocator.remaining(raknet.datagram.Capsule, new_capsule)[0..ref.body.len];
+            heap.push(ref.orderingIndex, new_capsule);
+            // datas are buffer up but not ready for processing
+            return;
         }
     }
 

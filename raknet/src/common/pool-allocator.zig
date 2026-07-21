@@ -8,6 +8,7 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
             .growable = true,
         },
     );
+
     return struct {
         pub const PAGE_SIZE = POOL_SIZE;
         backing_allocator: std.mem.Allocator,
@@ -33,6 +34,7 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
             const ptr = try self.pool.create(self.backing_allocator);
             return @ptrCast(@alignCast(ptr));
         }
+
         pub inline fn alloc(self: *@This(), comptime T: type) !*[@divExact(POOL_SIZE, @sizeOf(T))]T {
             if (@sizeOf(T) > POOL_SIZE)
                 @compileError("Object too large, T:" ++ @typeName(T));

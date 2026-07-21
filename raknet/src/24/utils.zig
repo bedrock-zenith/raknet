@@ -14,6 +14,7 @@ test "fixed" {
 pub inline fn overflowed(old: u32, new: u32) bool {
     return ((new -% old) & MAX_U24) >= HALF_U24;
 }
+
 pub inline fn distance(old: u32, new: u32) i32 {
     const diff = (new -% old) & MAX_U24;
 
