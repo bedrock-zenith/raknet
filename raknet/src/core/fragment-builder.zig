@@ -1,14 +1,14 @@
 const std = @import("std");
 
-const Capsule = @import("../data/root.zig").datagram.Capsule;
+const Segment = @import("../data/root.zig").datagram.Segment;
 
 count: u32 = 0,
 buffer_size: u32 = 0,
-first: ?*Capsule = null,
-last: ?*Capsule = null,
+first: ?*Segment = null,
+last: ?*Segment = null,
 pub const empty: @This() = .{};
 
-pub fn append(self: *@This(), capsule: *Capsule) bool {
+pub fn append(self: *@This(), capsule: *Segment) bool {
     const meta = &(capsule.fragment_data orelse return false);
     capsule.next = null;
 
@@ -23,8 +23,8 @@ pub fn append(self: *@This(), capsule: *Capsule) bool {
         capsule.next = self.last;
         self.last = capsule;
     } else {
-        var last_ptr: *?*Capsule = if (self.first) |_| &self.last.?.next else &self.last;
-        var cursor: ?*Capsule = last_ptr.*;
+        var last_ptr: *?*Segment = if (self.first) |_| &self.last.?.next else &self.last;
+        var cursor: ?*Segment = last_ptr.*;
 
         while (cursor) |ptr| {
             if (ptr.fragment_data.?.index == meta.index) return false;
@@ -56,8 +56,8 @@ pub fn append(self: *@This(), capsule: *Capsule) bool {
 }
 
 pub inline fn iterator(self: *@This()) struct {
-    cursor: ?*Capsule = null,
-    pub inline fn next(this: *@This()) ?*Capsule {
+    cursor: ?*Segment = null,
+    pub inline fn next(this: *@This()) ?*Segment {
         if (this.cursor) |c| {
             this.cursor = c.fragment_data.?.next;
             return c;

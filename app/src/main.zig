@@ -3,7 +3,7 @@ const Io = std.Io;
 const net = Io.net;
 
 const raknet = @import("raknet");
-const Listener = raknet.core.Server;
+const Listener = raknet.core.Listener;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

@@ -1,7 +1,7 @@
-const ClientConnection = @import("root.zig");
+const ClientSession = @import("root.zig");
 
-pub const ServerEvent = union {
-    message: struct { connection: *ClientConnection, message: []const u8 },
-    connection: struct { connection: *ClientConnection },
-    disconnection: struct { connection: *ClientConnection },
+pub const ListenerEvent = union {
+    message: struct { connection: *ClientSession, message: []const u8 },
+    connection: struct { connection: *ClientSession },
+    disconnection: struct { connection: *ClientSession },
 };

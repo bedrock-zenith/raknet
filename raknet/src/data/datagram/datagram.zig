@@ -4,55 +4,57 @@ const common = @import("../../common/root.zig");
 const Reader = common.Reader;
 const binary = common.binary;
 const raknet = @import("../root.zig");
-const Reliability = raknet.Reliability;
+const DeliveryPolicy = raknet.DeliveryPolicy;
 
 pub const BIT_MASK = 0b1000_0000;
 const FRAGMENTED_BIT = 0x10;
 
-pub const Capsule = struct {
-    reliability: Reliability,
-    orderChannel: u8,
-    fragment_data: ?struct {
+pub const Segment = struct {
+    delivery_policy: DeliveryPolicy,
+    reliable_index: u32,
+    fragment: ?struct {
         id: u16,
         count: u32,
         index: u32,
     },
-    orderingIndex: u32,
-    reliableIndex: u32,
-    sequenceIndex: u32,
+    channel: struct {
+        id: u8,
+        epoch_index: u32,
+        snapshot_index: u32,
+    },
     body: []const u8,
     // We can use it as linked list when building fragments together
-    next: ?*Capsule = null,
+    next: ?*Segment = null,
 
-    pub fn read(self: *Capsule, reader: *Reader) !void {
+    pub fn read(self: *Segment, reader: *Reader) !void {
         try reader.assert(3);
         const flags = reader.readByte();
-        const reliability: Reliability = @enumFromInt((flags >> 5) & 0x7);
-        self.reliability = reliability;
+        const delivery_policy: DeliveryPolicy = @enumFromInt((flags >> 5) & 0x7);
+        self.delivery_policy = delivery_policy;
 
         const is_fragmented = (flags & FRAGMENTED_BIT != 0);
         // raknet being in bits is just lame
         const data_len = reader.readInt(u16, .big) >> 3;
 
-        if (reliability.isReliable()) {
+        if (delivery_policy.isReliable()) {
             try reader.assert(3);
-            self.reliableIndex = binary.readU24LE(reader);
+            self.reliable_index = binary.readU24LE(reader);
         }
 
-        if (reliability.isSequenced()) {
+        if (delivery_policy.isSequenced()) {
             try reader.assert(3);
-            self.sequenceIndex = binary.readU24LE(reader);
+            self.channel.snapshot_index = binary.readU24LE(reader);
         }
 
-        if (reliability.isSequencedOrdered()) {
+        if (delivery_policy.isSequencedOrdered()) {
             try reader.assert(4);
-            self.orderingIndex = binary.readU24LE(reader);
-            self.orderChannel = reader.readByte();
+            self.channel.epoch_index = binary.readU24LE(reader);
+            self.channel.id = reader.readByte();
         }
 
         if (is_fragmented) {
             try reader.assert(4 + 2 + 4);
-            self.fragment_data.? = .{
+            self.fragment.? = .{
                 .count = reader.readInt(u32, .big),
                 .id = reader.readInt(u16, .big),
                 .index = reader.readInt(u32, .big),

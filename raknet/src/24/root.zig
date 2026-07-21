@@ -1,4 +1,3 @@
+pub const BitWindow = @import("bit-window.zig").BitWindow;
+pub const HeapArray = @import("heap-array.zig").HeapArray;
 pub const Indexable = @import("utils.zig");
-pub const IndexableBitQueue = @import("indexable-bit-queue.zig").IndexableBitQueue;
-pub const IndexableQueue = @import("indexable-queue.zig").IndexableQueue;
-pub const MinHeap = @import("min-heap.zig").MinHeap;

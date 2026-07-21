@@ -1,4 +1,4 @@
-pub const Reliability = enum(u8) {
+pub const DeliveryPolicy = enum(u8) {
     Unreliable = 0,
     UnreliableSequenced = 1,
     Reliable = 2,
@@ -8,7 +8,7 @@ pub const Reliability = enum(u8) {
     ReliableWithAckReceipt = 6,
     ReliableOrderedWithAckReceipt = 7,
 
-    pub inline fn isReliable(reliability: Reliability) bool {
+    pub inline fn isReliable(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .Reliable => true,
             .ReliableOrdered => true,
@@ -17,14 +17,14 @@ pub const Reliability = enum(u8) {
             else => false,
         };
     }
-    pub inline fn isSequenced(reliability: Reliability) bool {
+    pub inline fn isSequenced(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .UnreliableSequenced => true,
             .ReliableSequenced => true,
             else => false,
         };
     }
-    pub inline fn isSequencedOrdered(reliability: Reliability) bool {
+    pub inline fn isSequencedOrdered(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .UnreliableSequenced => true,
             .ReliableOrdered => true,
@@ -33,7 +33,7 @@ pub const Reliability = enum(u8) {
             else => false,
         };
     }
-    pub inline fn isOrdered(reliability: Reliability) bool {
+    pub inline fn isOrdered(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .ReliableOrdered => true,
             .ReliableOrderedWithAckReceipt => true,

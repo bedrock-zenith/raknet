@@ -9,24 +9,24 @@ const raknet = @import("../data/root.zig");
 const IpAddress = raknet.RakAddress.Type;
 const PacketId = raknet.PacketId;
 const offline_packet = @import("../data/root.zig").offline;
-pub const ClientConnection = @import("client-connection.zig");
+pub const ClientSession = @import("client-session.zig");
 const Endpoint = @import("endpoint.zig");
 const FramePool = @import("root.zig").FramePool;
-pub const ServerEvent = @import("server-events.zig").ServerEvent;
+pub const ListenerEvent = @import("server-events.zig").ListenerEvent;
 
-const Server = @This();
-const ServerEventQueue = std.Deque(ServerEvent);
+const Listener = @This();
+const ListenerEventQueue = std.Deque(ListenerEvent);
 
 guid: u64,
 io: *const std.Io,
 allocator: std.mem.Allocator,
-connections: std.AutoHashMap(IpAddress, *ClientConnection),
+connections: std.AutoHashMap(IpAddress, *ClientSession),
 pool_allocator: FramePool,
 motd: []const u8,
 secret_key: [16]u8,
-server_events: ServerEventQueue,
+server_events: ListenerEventQueue,
 
-pub fn init(self: *Server, io: *const std.Io, allocator: std.mem.Allocator) !void {
+pub fn init(self: *Listener, io: *const std.Io, allocator: std.mem.Allocator) !void {
     var xiro = std.Random.Xoroshiro128.init(undefined);
     self.* = .{
         .io = io,
@@ -43,11 +43,11 @@ pub fn init(self: *Server, io: *const std.Io, allocator: std.mem.Allocator) !voi
     try std.Io.randomSecure(io.*, &self.secret_key);
 }
 
-pub fn optimze(self: *Server) void {
+pub fn optimze(self: *Listener) void {
     self.frame_pool.pool.reset(self.allocator, .{ .retain_with_limit = 64 });
 }
 
-pub fn deinit(self: *Server) void {
+pub fn deinit(self: *Listener) void {
     self.server_events.deinit(self.allocator);
     self.frame_pool.deinit(self.allocator);
 
@@ -59,7 +59,7 @@ pub fn deinit(self: *Server) void {
     self.connections.deinit();
 }
 
-pub fn receive(self: *Server, buffer: []const u8, endpoint: *const Endpoint) void {
+pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     if (buffer.len == 0) return;
 
     const packetId = buffer[0];
@@ -69,13 +69,13 @@ pub fn receive(self: *Server, buffer: []const u8, endpoint: *const Endpoint) voi
         self.offline(buffer, endpoint);
 }
 
-fn online(self: *Server, buffer: []const u8, endpoint: *const Endpoint) void {
+fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     if (self.connections.get(endpoint.address)) |connection| {
-        connection.*.base_connection.handle(buffer) catch {};
+        connection.*.connection.handle(buffer) catch {};
     }
 }
 
-fn offline(self: *Server, buffer: []const u8, endpoint: *const Endpoint) void {
+fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     const packet_id: PacketId = .from(buffer[0]);
     (switch (packet_id) {
         .UnconnectedPing => handleUnconnectedPing(self, buffer, endpoint),
@@ -83,7 +83,7 @@ fn offline(self: *Server, buffer: []const u8, endpoint: *const Endpoint) void {
         .OpenConnectionRequestTwo => handleOpenConnectionTwo(self, buffer, endpoint),
         .DisconnectionNotification => {
             if (self.connections.getEntry(endpoint.address)) |entry| {
-                if (entry.value_ptr.*.*.base_connection.connection_state == .Unconnected)
+                if (entry.value_ptr.*.*.connection.connection_state == .Unconnected)
                     self.connections.removeByPtr(entry.key_ptr);
             }
         },
@@ -93,7 +93,7 @@ fn offline(self: *Server, buffer: []const u8, endpoint: *const Endpoint) void {
         std.debug.print("debug: Failed process {s}", .{@tagName(packet_id)});
 }
 
-fn handleUnconnectedPing(self: *const Server, buffer: []const u8, endpoint: *const Endpoint) !void {
+fn handleUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     const packet = try readPacket(buffer, offline_packet.UnconnectedPing);
     try sendPacket(self, endpoint, offline_packet.UnconnectedPong, &.{
         .ping_time = packet.ping_time,
@@ -102,10 +102,10 @@ fn handleUnconnectedPing(self: *const Server, buffer: []const u8, endpoint: *con
     });
 }
 
-fn handleOpenConnectionOne(self: *const Server, buffer: []const u8, endpoint: *const Endpoint) !void {
+fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     if (self.connections.get(endpoint.address)) |connection| {
         try sendPacket(self, endpoint, offline_packet.AlreadyConnected, &.{
-            .client_guid = connection.base_connection.guid,
+            .client_guid = connection.connection.guid,
         });
         return;
     }
@@ -128,10 +128,10 @@ fn handleOpenConnectionOne(self: *const Server, buffer: []const u8, endpoint: *c
     });
 }
 
-fn handleOpenConnectionTwo(self: *Server, buffer: []const u8, endpoint: *const Endpoint) !void {
+fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     if (self.connections.get(endpoint.address)) |connection| {
         try sendPacket(self, endpoint, offline_packet.AlreadyConnected, &.{
-            .client_guid = connection.base_connection.guid,
+            .client_guid = connection.connection.guid,
         });
         return;
     }
@@ -150,7 +150,7 @@ fn handleOpenConnectionTwo(self: *Server, buffer: []const u8, endpoint: *const E
         .server_guid = self.guid,
     });
 
-    const client = try self.allocator.create(ClientConnection);
+    const client = try self.allocator.create(ClientSession);
     try client.init(
         endpoint,
         self,
@@ -160,7 +160,7 @@ fn handleOpenConnectionTwo(self: *Server, buffer: []const u8, endpoint: *const E
     try self.connections.put(endpoint.address, client);
 }
 
-fn genCookie(self: *const Server, endpoint: *const Endpoint) u32 {
+fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
     var sip: std.hash.SipHash64(1, 3) = .init(&self.secret_key);
     // we switch on underlying data type as whole union has different padding for smaller types,
     // so it might contain undefined bytes inside the hash,
@@ -172,7 +172,7 @@ fn genCookie(self: *const Server, endpoint: *const Endpoint) u32 {
     return @intCast(sip.finalInt() & 0xffff_ffff);
 }
 
-inline fn sendPacket(self: *const Server, endpoint: *const Endpoint, comptime T: type, value: *const T) !void {
+inline fn sendPacket(self: *const Listener, endpoint: *const Endpoint, comptime T: type, value: *const T) !void {
     var writer_buffer: [1024]u8 = undefined;
     var writer: Writer = .init(&writer_buffer, 0);
     writer.writeByte(@intFromEnum(T.PacketId));
