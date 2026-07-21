@@ -71,7 +71,7 @@ pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) v
 
 fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     if (self.connections.get(endpoint.address)) |connection| {
-        connection.*.connection.handle(buffer) catch {};
+        connection.*.connection.receive(buffer) catch {};
     }
 }
 
@@ -83,7 +83,7 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void 
         .OpenConnectionRequestTwo => handleOpenConnectionTwo(self, buffer, endpoint),
         .DisconnectionNotification => {
             if (self.connections.getEntry(endpoint.address)) |entry| {
-                if (entry.value_ptr.*.*.connection.connection_state == .Unconnected)
+                if (entry.value_ptr.*.*.connection.state == .Unconnected)
                     self.connections.removeByPtr(entry.key_ptr);
             }
         },

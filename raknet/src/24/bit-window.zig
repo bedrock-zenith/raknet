@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Index24 = @import("utils.zig");
 
 pub fn BitWindow(comptime range: comptime_int) type {
@@ -25,6 +26,10 @@ pub fn BitWindow(comptime range: comptime_int) type {
         pub inline fn clear(self: *Self) void {
             self.tail = self.head;
             self.len = 0;
+        }
+
+        pub fn available(self: *Self) u32 {
+            return RANGE - self.len;
         }
 
         /// Fast skip: clear (set to zero) reserved bit range and advance head to newIndex + 1
@@ -107,8 +112,6 @@ pub fn BitWindow(comptime range: comptime_int) type {
             };
         }
 
-        /// Accelerated range iterator using @ctz (count trailing zeros)
-        /// Finds contiguous set of bits (either 1s or 0s)
         pub const Iterator = struct {
             ref: *const Self,
             curr_seq: u32,

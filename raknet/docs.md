@@ -11,7 +11,7 @@
 - `fragment.{.id, .count, .index}` -> `fragment.{.id, .count, .index}`
 - `reliability` -> `delivery_policy`
 
-- `rx/tx` ref: `receiver/transmitter`
+- `incoming/outgoing` -> `rx/tx` ref: `receiver/transmitter`
 
 ### WARNING AI SHI.
 

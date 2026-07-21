@@ -10,18 +10,20 @@ pub const BIT_MASK = 0b1000_0000;
 const FRAGMENTED_BIT = 0x10;
 
 pub const Segment = struct {
-    delivery_policy: DeliveryPolicy,
-    reliable_index: u32,
-    fragment: ?struct {
+    pub const FragmentInfo = struct {
         id: u16,
         count: u32,
         index: u32,
-    },
-    channel: struct {
+    };
+    pub const ChannelInfo = struct {
         id: u8,
         epoch_index: u32,
         snapshot_index: u32,
-    },
+    };
+    delivery_policy: DeliveryPolicy,
+    reliable_index: u32,
+    fragment: ?FragmentInfo = null,
+    channel: ChannelInfo,
     body: []const u8,
     // We can use it as linked list when building fragments together
     next: ?*Segment = null,
@@ -41,12 +43,12 @@ pub const Segment = struct {
             self.reliable_index = binary.readU24LE(reader);
         }
 
-        if (delivery_policy.isSequenced()) {
+        if (delivery_policy.hasSnapshot()) {
             try reader.assert(3);
             self.channel.snapshot_index = binary.readU24LE(reader);
         }
 
-        if (delivery_policy.isSequencedOrdered()) {
+        if (delivery_policy.hasEpochOrSnapshot()) {
             try reader.assert(4);
             self.channel.epoch_index = binary.readU24LE(reader);
             self.channel.id = reader.readByte();
@@ -59,7 +61,7 @@ pub const Segment = struct {
                 .id = reader.readInt(u16, .big),
                 .index = reader.readInt(u32, .big),
             };
-        }
+        } else self.fragment = null;
 
         try reader.assert(data_len);
         self.body = reader.readSlice(data_len);

@@ -54,8 +54,8 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
         }
 
         pub inline fn destroy(self: *@This(), v: *anyopaque) void {
-            const block_ptr: *[POOL_SIZE]u8 = @ptrCast(@alignCast(v));
-            self.pool.destroy(block_ptr);
+            const block_ptr: *[POOL_SIZE]u8 = @ptrCast(v);
+            self.pool.destroy(@alignCast(block_ptr));
         }
     };
 }

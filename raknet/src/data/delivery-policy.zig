@@ -17,14 +17,14 @@ pub const DeliveryPolicy = enum(u8) {
             else => false,
         };
     }
-    pub inline fn isSequenced(reliability: DeliveryPolicy) bool {
+    pub inline fn hasSnapshot(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .UnreliableSequenced => true,
             .ReliableSequenced => true,
             else => false,
         };
     }
-    pub inline fn isSequencedOrdered(reliability: DeliveryPolicy) bool {
+    pub inline fn hasEpochOrSnapshot(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .UnreliableSequenced => true,
             .ReliableOrdered => true,
@@ -33,7 +33,7 @@ pub const DeliveryPolicy = enum(u8) {
             else => false,
         };
     }
-    pub inline fn isOrdered(reliability: DeliveryPolicy) bool {
+    pub inline fn hasEpoch(reliability: DeliveryPolicy) bool {
         return switch (reliability) {
             .ReliableOrdered => true,
             .ReliableOrderedWithAckReceipt => true,

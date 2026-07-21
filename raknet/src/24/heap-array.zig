@@ -5,8 +5,8 @@ pub fn HeapArray(comptime T: type, comptime capacity: usize, comptime compareFn:
     return struct {
         const Self = @This();
 
-        buffer: [capacity]T = undefined,
         len: usize = 0,
+        buffer: [capacity]T = undefined,
 
         pub inline fn peek(self: *const Self) ?T {
             if (self.len == 0) {

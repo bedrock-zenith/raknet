@@ -8,9 +8,13 @@ first: ?*Segment = null,
 last: ?*Segment = null,
 pub const empty: @This() = .{};
 
-pub fn append(self: *@This(), capsule: *Segment) bool {
-    const meta = &(capsule.fragment_data orelse return false);
-    capsule.next = null;
+pub fn isEmpty(self: *const @This()) bool {
+    return self.last == null;
+}
+
+pub fn append(self: *@This(), segment: *Segment) bool {
+    const meta = &(segment.fragment orelse return false);
+    segment.next = null;
 
     // So the self.last is just an checkpoint in the linked list
     // where anything from first to last is contiguous fragments where next.index == this.index + 1;
@@ -19,32 +23,32 @@ pub fn append(self: *@This(), capsule: *Segment) bool {
     // in case where first is still null, the self.last might hold dirty values
     if (meta.index == 0) {
         if (self.first != null) return false;
-        self.first = capsule;
-        capsule.next = self.last;
-        self.last = capsule;
+        self.first = segment;
+        segment.next = self.last;
+        self.last = segment;
     } else {
         var last_ptr: *?*Segment = if (self.first) |_| &self.last.?.next else &self.last;
         var cursor: ?*Segment = last_ptr.*;
 
         while (cursor) |ptr| {
-            if (ptr.fragment_data.?.index == meta.index) return false;
-            if (ptr.fragment_data.?.index > meta.index) break;
+            if (ptr.fragment.?.index == meta.index) return false;
+            if (ptr.fragment.?.index > meta.index) break;
 
             last_ptr = &ptr.next;
             cursor = ptr.next;
         }
 
-        capsule.next = cursor;
-        last_ptr.* = capsule;
+        segment.next = cursor;
+        last_ptr.* = segment;
     }
 
     self.count += 1;
-    self.buffer_size += @intCast(capsule.body.len);
+    self.buffer_size += @intCast(segment.body.len);
 
     if (self.first != null)
         while (self.last) |last| {
             if (last.next) |next_node| {
-                if (last.fragment_data.?.index + 1 == next_node.fragment_data.?.index) {
+                if (last.fragment.?.index + 1 == next_node.fragment.?.index) {
                     self.last = next_node;
                     continue;
                 }
@@ -59,7 +63,7 @@ pub inline fn iterator(self: *@This()) struct {
     cursor: ?*Segment = null,
     pub inline fn next(this: *@This()) ?*Segment {
         if (this.cursor) |c| {
-            this.cursor = c.fragment_data.?.next;
+            this.cursor = c.next;
             return c;
         }
         return null;
