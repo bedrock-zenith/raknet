@@ -1,5 +1,8 @@
 ### naming conventions
 
+ <!-- lets not be that explicit, so that why shit is supposed to be shi only -->
+
+- `shit` -> `shi`
 - `orderIndex` -> `epoch_id`
 - `sequenceIndex` -> `snapshot_id`
 - `reliabilityIndex` -> `reliable_id`
