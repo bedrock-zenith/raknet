@@ -1,6 +1,11 @@
-const Socket = @import("std").Io.net.Socket;
+const Io = @import("std").Io;
+const Socket = Io.net.Socket;
 
-const IpAddress = @import("../data/root.zig").RakAddress.Type;
+const IpAddress = @import("../protocol/root.zig").RakAddress.Type;
 
 source: *const Socket,
 address: IpAddress,
+
+pub inline fn send(self: *const @This(), io: Io, data: []const u8) !void {
+    try self.source.send(io, &self.address, data);
+}

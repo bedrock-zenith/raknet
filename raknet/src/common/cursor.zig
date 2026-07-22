@@ -28,15 +28,19 @@ fn CursorKind(comptime isReadOnly: bool) type {
 
             cursor.pointer +%= size;
         }
+
         pub inline fn getProcessedBytes(cursor: *const Instance) BufferType {
             return cursor.buffer[0..cursor.pointer];
         }
+
         pub inline fn getRemainingBytes(cursor: *const Instance) BufferType {
             return cursor.buffer[cursor.pointer..];
         }
+
         pub inline fn remaining(cursor: *const Instance) usize {
             return cursor.buffer.len - cursor.pointer;
         }
+
         pub inline fn assert(cursor: *const Instance, bytes: usize) CursorError!void {
             if (cursor.remaining() < bytes)
                 return error.IndexOutOfBounds;

@@ -2,26 +2,34 @@ const std = @import("std");
 
 const Utils = @import("../24/root.zig").Utils;
 const BitWindow = @import("../24/root.zig").BitWindow;
+const Window = @import("../24/window.zig").Window;
 const common = @import("../common/root.zig");
 const Reader = common.Reader;
 const Writer = common.Writer;
 const binary = common.binary;
 const CONSTANTS = @import("../constants.zig");
-const raknet = @import("../data/root.zig");
+const raknet = @import("../protocol/root.zig");
+const Segment = raknet.datagram.Segment;
 const ConnectionState = @import("connection-state.zig").ConnectionState;
 const Endpoint = @import("endpoint.zig");
 const FragmentBuilder = @import("fragment-builder.zig");
 const PoolAllocator = @import("root.zig").FramePool;
 
 const DatagramWindow = BitWindow(CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE);
+const DatagramMemoryWindow = Window(?*raknet.datagram.DatagramMemory, CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE);
 const ReliableWindow = BitWindow(CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE * 4);
 const CHANNELS_COUNT = 16;
 const PARALLEL_FRAGMENT_BUILDERS = 32;
 const RECEIVE_BUFFER = 128;
+const DATAGRAM_ACKNOWLEDGE_TIMEOUT_TICKS = 3000;
 
 const Connection = @This();
+
 io: *const std.Io,
+mtu: u16,
 guid: u64,
+current_tick: usize,
+last_tick: usize,
 state: ConnectionState,
 endpoint: Endpoint,
 pool_allocator: *PoolAllocator,
@@ -30,31 +38,55 @@ rx_datagram_window: DatagramWindow,
 rx_reliable_window: ReliableWindow,
 rx_fragment_builder: [PARALLEL_FRAGMENT_BUILDERS]FragmentBuilder,
 rx_channels: [CHANNELS_COUNT]Channel,
-rx_received: std.Deque(*const raknet.datagram.Segment),
+rx_received: std.Deque(*const Segment),
 
-tx_memory: [CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE]?*const raknet.datagram.Segment,
+tx_reliable_index: u32,
+tx_fragment_index: u16,
+tx_datagram_writer: ?*raknet.datagram.DatagramMemory,
+tx_buffer_main: std.Deque(*raknet.datagram.DatagramMemory),
+tx_buffer_urgent: std.Deque(*raknet.datagram.DatagramMemory),
+tx_datagram_window: DatagramMemoryWindow,
+tx_channels: [CHANNELS_COUNT]Channel,
 
-pub fn init(self: *Connection, io: *const std.Io, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
+pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, guid: u64, mtu: u16) !void {
     self.* = .{
         .io = io,
         .guid = guid,
         .state = .Unconnected,
         .endpoint = endpoint,
         .pool_allocator = pool,
+        .mtu = mtu,
+        .last_tick = 0,
+        .current_tick = 0,
+
+        // rx
         .rx_datagram_window = .{},
         .rx_reliable_window = .{},
         .rx_fragment_builder = @splat(.empty),
         .rx_channels = @splat(.{}),
+
+        // tx
+        .tx_datagram_window = .{
+            .buffer = @splat(null),
+        },
+        .tx_channels = @splat(.{}),
+        .tx_reliable_index = 0,
+        .tx_fragment_index = 0,
+        .tx_datagram_writer = null,
+
+        // post setup
         .rx_received = undefined,
-        .tx_memory = @splat(null),
+        .tx_buffer_main = undefined,
+        .tx_buffer_urgent = undefined,
     };
     self.rx_received = try .initCapacity(pool.backing_allocator, 512);
     errdefer self.rx_received.deinit(pool.backing_allocator);
 
-    // const buffer = try pool.alloc(*const raknet.datagram.Segment);
-    // // In case of failed initialization we free the allocated memory
-    // errdefer pool.destroy(buffer);
-    // self.send_queue = .initBuffer(buffer[0..]);
+    self.tx_buffer_main = try .initCapacity(pool.backing_allocator, 512);
+    errdefer self.tx_buffer_main.deinit(pool.backing_allocator);
+
+    self.tx_buffer_urgent = try .initCapacity(pool.backing_allocator, 512);
+    errdefer self.tx_buffer_urgent.deinit(pool.backing_allocator);
 }
 
 pub fn deinit(self: *Connection) void {
@@ -67,8 +99,6 @@ pub fn deinit(self: *Connection) void {
 
     self.rx_received.deinit(self.pool_allocator.backing_allocator);
 
-    //self.pool_allocator.destroy(self.send_queue.buffer);
-
     // Do not deallocate anything that wasn't allocated in BaseConnection
     // Clean up any unprocessed fragments
     for (self.rx_fragment_builder) |*v| {
@@ -78,9 +108,22 @@ pub fn deinit(self: *Connection) void {
             self.pool_allocator.destroy(segment);
     }
 
-    for (self.tx_memory) |window|
-        if (window) |segment|
-            self.pool_allocator.destroy(segment);
+    // tx
+    var tx_datagram_window_iterator = self.tx_datagram_window.iterator();
+    while (tx_datagram_window_iterator.next()) |item| if (item) |window| {
+        self.pool_allocator.destroy(window);
+    };
+}
+
+pub fn tick(self: *Connection, tick_id: usize) !void {
+    self.current_tick = tick_id;
+    if (self.tx_datagram_writer) |writer| {
+        if (tick_id > writer.tick) {
+            _ = try txFlushWriter(self);
+        }
+    }
+
+    _ = try txFlush(self);
 }
 
 pub fn receive(self: *Connection, datagram: []const u8) !void {
@@ -89,19 +132,65 @@ pub fn receive(self: *Connection, datagram: []const u8) !void {
         return;
     }
 
-    if (datagram[0] & raknet.datagram.ACKNOWLEDGE_BIT_MASK != 0) return;
-    if (datagram[0] & raknet.datagram.NOT_ACKNOWLEDGE_BIT_MASK != 0) return;
+    if (datagram[0] & (raknet.datagram.ACKNOWLEDGE_BIT_MASK | raknet.datagram.NOT_ACKNOWLEDGE_BIT_MASK) != 0)
+        return try rxAcknowledge(self, datagram);
 
     try rxDatagram(self, datagram);
+}
+
+fn rxAcknowledge(self: *Connection, datagram: []const u8) !void {
+    var reader: Reader = .init(datagram, 1);
+    try reader.assert(3);
+    const is_nack = datagram[0] & raknet.datagram.NOT_ACKNOWLEDGE_BIT_MASK != 0;
+
+    const count: u16 = reader.readInt(u16, .big);
+
+    for (0..count) |_| {
+        const range = try binary.readRange(&reader);
+        var offset = range.min;
+        const distance = Utils.distance(range.min, range.max);
+        if (distance < 0) continue;
+
+        for (0..@intCast(distance + 1)) |_| {
+            const index = offset;
+            offset = Utils.fixed(offset + 1);
+            if (self.tx_datagram_window.includes(index)) {
+                const ptr = index % self.tx_datagram_window.buffer.len;
+
+                const datagram_element = self.tx_datagram_window.buffer[ptr] orelse continue;
+
+                self.tx_datagram_window.buffer[ptr] = null;
+
+                if (is_nack) {
+                    try self.tx_buffer_urgent.pushBack(self.pool_allocator.backing_allocator, datagram_element);
+                } else {
+                    self.pool_allocator.destroy(@constCast(datagram_element));
+                }
+            }
+        }
+    }
+
+    try txCleanDatagramWindow(self);
+}
+
+fn txCleanDatagramWindow(self: *Connection) !void {
+    while (self.tx_datagram_window.len > 0) {
+        const datagram = self.tx_datagram_window.peek() orelse {
+            _ = self.tx_datagram_window.pop();
+            continue;
+        };
+
+        if (self.current_tick < datagram.tick + DATAGRAM_ACKNOWLEDGE_TIMEOUT_TICKS) break;
+
+        _ = self.tx_datagram_window.pop();
+        try self.tx_buffer_urgent.pushBack(self.pool_allocator.backing_allocator, datagram);
+    }
 }
 
 fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     var reader: Reader = .init(datagram, 1);
     try reader.assert(3);
     const datagram_index: u32 = binary.readU24LE(&reader);
-
-    std.log.info("---------------------------------", .{});
-    std.log.info("datagram_index: {}, size: {}", .{ datagram_index, datagram.len });
 
     const last_datagram_index = Utils.fixed(self.rx_datagram_window.head -% 1);
     const distance = Utils.distance(last_datagram_index, datagram_index);
@@ -147,10 +236,10 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     self.rx_datagram_window.setValue(datagram_index, true);
 
     // gets optimized away
-    var segment: raknet.datagram.Segment = undefined;
+    var segment: Segment = undefined;
     while (reader.remaining() > 0) {
         segment.read(&reader) catch continue;
-        std.log.info("SEGMENT; Reliability: {}, data: {any}", .{ segment.delivery_policy, segment.body });
+        segment.meta.alloc = .Stack;
         rxSegment(self, &segment) catch |err| switch (err) {
             error.ChannelOutOfBounds => continue,
             else => return err,
@@ -158,7 +247,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     }
 }
 
-fn rxFragment(self: *Connection, fragment: raknet.datagram.Segment.FragmentInfo, input_segment: *raknet.datagram.Segment) !?*raknet.datagram.Segment {
+fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: *Segment) !?*Segment {
     const builder_index = fragment.id % PARALLEL_FRAGMENT_BUILDERS;
 
     const builder = &self.rx_fragment_builder[builder_index];
@@ -194,13 +283,14 @@ fn rxFragment(self: *Connection, fragment: raknet.datagram.Segment.FragmentInfo,
 
         input_segment.* = segment.*;
         segment.body = buffer;
+        segment.meta.alloc = .External;
         return segment;
     }
 
     return null;
 }
 
-fn rxSegment(self: *Connection, data: *raknet.datagram.Segment) !void {
+fn rxSegment(self: *Connection, data: *Segment) !void {
     var segment = data;
 
     // f*ck it, just ignore this sus connection behavior
@@ -214,10 +304,11 @@ fn rxSegment(self: *Connection, data: *raknet.datagram.Segment) !void {
 
         // We are missing too many packets to recover the connection
         // or we got old packet thats too old
-        if (hole > @as(i32, @bitCast(self.rx_reliable_window.available())) or
-            // Head is not inclusive, and hole is relative to head, assertion (index >= window.tail)
-            hole < -%@as(i32, @bitCast(self.rx_reliable_window.len)))
+        if (hole > @as(i32, @bitCast(self.rx_reliable_window.available())))
             return error.Unrecoverable;
+
+        if (hole < -%@as(i32, @bitCast(self.rx_reliable_window.len)))
+            return;
 
         // reserve enough space
         if (hole >= 0)
@@ -321,33 +412,208 @@ fn rxSegment(self: *Connection, data: *raknet.datagram.Segment) !void {
     try rxFinalize(self, segment);
 }
 
-fn rxFinalize(self: *Connection, segment: *const raknet.datagram.Segment) !void {
-    _ = self; // autofix
-    std.log.info("todo: received {any}", .{segment.body});
+fn rxFinalize(self: *Connection, segment: *const Segment) !void {
+    const allocated = if (segment.meta.alloc == .Stack) try cloneSegment(self, segment) else segment;
+    try self.rx_received.pushBack(self.pool_allocator.backing_allocator, allocated);
 }
 
-fn freeSegment(self: *const Connection, segment: *const raknet.datagram.Segment) !void {
+fn freeSegment(self: *const Connection, segment: *const Segment) !void {
     if (segment.fragment) |_|
         self.pool_allocator.backing_allocator.destroy(segment.body.ptr);
 
     self.pool_allocator.destroy(segment);
 }
 
-fn cloneSegment(self: *const Connection, segment: *const raknet.datagram.Segment) !*raknet.datagram.Segment {
-    var allocated_segment = try self.pool_allocator.create(raknet.datagram.Segment);
+fn cloneSegment(self: *const Connection, segment: *const Segment) !*Segment {
+    var allocated_segment = try self.pool_allocator.create(Segment);
     allocated_segment.* = segment.*;
 
-    const bytes = self.pool_allocator.remaining(raknet.datagram.Segment, allocated_segment)[0..segment.body.len];
+    const bytes = self.pool_allocator.remaining(Segment, allocated_segment)[0..segment.body.len];
     allocated_segment.body = bytes;
     @memcpy(bytes, segment.body);
-
+    allocated_segment.meta.alloc = .SelfContained;
     return allocated_segment;
+}
+
+pub fn send(self: *Connection, data: []const u8) !void {
+    // Parameters candidates shi
+    const channel_id = 0;
+    const delivery_policy: raknet.DeliveryPolicy = .ReliableOrdered;
+
+    const DHS = raknet.datagram.DATAGRAM_HEADER_SIZE;
+    const space: usize = @intCast(self.mtu - CONSTANTS.UDP_HEADER_SIZE);
+    const header: usize = DHS + Segment.headerSize(delivery_policy, false);
+
+    var channel = self.tx_channels[channel_id];
+
+    var segment: Segment = .{
+        .delivery_policy = delivery_policy,
+        .channel = .{
+            .id = channel_id,
+            .epoch_index = channel.epoch_index,
+            .snapshot_index = channel.snapshot_index,
+        },
+        .fragment = null,
+        .body = data,
+
+        // Unused
+        .meta = undefined,
+        .reliable_index = undefined,
+    };
+
+    if (delivery_policy.hasSnapshot()) {
+        channel.snapshot_index = Utils.fixed(channel.snapshot_index +% 1);
+    } else if (delivery_policy.hasEpoch()) {
+        channel.epoch_index = Utils.fixed(channel.epoch_index +% 1);
+        channel.snapshot_index = 0;
+    }
+
+    if (header + data.len <= space) {
+        if (delivery_policy.isReliable()) {
+            segment.reliable_index = self.tx_reliable_index;
+            self.tx_reliable_index = Utils.fixed(self.tx_reliable_index +% 1);
+        }
+
+        try txQueue(self, segment);
+        return;
+    }
+
+    // is reliable required for fragments
+    std.debug.assert(segment.delivery_policy.isReliable());
+
+    const max_chunk_size = self.mtu - DHS - Segment.headerSize(delivery_policy, true);
+    // @divCeil
+    const fragment_count = @divFloor(data.len - 1, max_chunk_size) + 1;
+    segment.fragment = .{
+        .id = self.tx_fragment_index,
+        .count = @intCast(fragment_count),
+        .index = 0,
+    };
+
+    for (0..fragment_count) |index| {
+        if (delivery_policy.isReliable()) {
+            segment.reliable_index = self.tx_reliable_index;
+            self.tx_reliable_index = Utils.fixed(self.tx_reliable_index +% 1);
+        }
+
+        segment.fragment.?.index = @intCast(index);
+
+        const offset = max_chunk_size * index;
+        const offset_end = @min(max_chunk_size * (index +% 1), data.len);
+        segment.body = data[offset..offset_end];
+
+        try txQueue(self, segment);
+    }
+}
+
+fn txQueue(self: *Connection, segment: Segment) !void {
+    var tx_writer = self.tx_datagram_writer orelse alloc: {
+        const new = try allocateDatagramMemory(self);
+        self.tx_datagram_writer = new;
+        break :alloc new;
+    };
+
+    if (tx_writer.segments_len >= tx_writer.segments.len) {
+        tx_writer = try txFlushWriter(self);
+    }
+
+    if (tx_writer.offset + segment.body.len >= tx_writer.buffer.len) {
+        tx_writer = try txFlushWriter(self);
+    }
+
+    const index = tx_writer.segments_len;
+    tx_writer.segments[index] = segment;
+    tx_writer.segments_len = index +% 1;
+
+    const new_buffer = tx_writer.buffer[tx_writer.offset..][0..segment.body.len];
+    @memcpy(new_buffer, segment.body);
+    tx_writer.segments[index].body = new_buffer;
+    tx_writer.segments[index].meta.alloc = .Borrowed;
+    tx_writer.offset +%= new_buffer.len;
+
+    if (tx_writer.segments_len >= tx_writer.segments.len)
+        _ = try txFlushWriter(self);
+}
+
+fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
+    var tx_writer = self.tx_datagram_writer orelse {
+        const txw = try allocateDatagramMemory(self);
+        self.tx_datagram_writer = txw;
+        return txw;
+    };
+
+    try self.tx_buffer_main.pushBack(self.pool_allocator.backing_allocator, tx_writer);
+    tx_writer = try allocateDatagramMemory(self);
+    self.tx_datagram_writer = tx_writer;
+    return tx_writer;
+}
+
+/// Returns true if state changed
+fn txFlush(self: *Connection) !bool {
+    var flushed = false;
+    while (self.tx_datagram_window.available() != 0) {
+        var reliable_only = false;
+
+        // first flush the ack/nack shi
+        var data_memory: *raknet.datagram.DatagramMemory = undefined;
+        if (self.tx_buffer_urgent.popFront()) |data| {
+            data_memory = data;
+            reliable_only = true;
+        } else if (self.tx_buffer_main.popFront()) |data| {
+            data_memory = data;
+        } else break;
+
+        errdefer self.pool_allocator.destroy(@constCast(data_memory));
+
+        if (try txRawSend(self, data_memory, self.tx_datagram_window.head, reliable_only)) {
+            data_memory.tick = self.current_tick;
+            _ = self.tx_datagram_window.push(data_memory);
+        } else {
+            self.pool_allocator.destroy(@constCast(data_memory));
+        }
+
+        flushed = true;
+    }
+
+    return flushed;
+}
+
+fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory, datagram_index: u32, reliable_only: bool) !bool {
+    var buffer: [2048]u8 = undefined;
+    var writer: Writer = .init(&buffer, 0);
+
+    writer.writeByte(raknet.datagram.DATAGRAM_BIT_MASK);
+    binary.writeU24LE(&writer, datagram_index);
+
+    for (0..datagram.segments_len) |i| {
+        const segment = &datagram.segments[i];
+
+        if (reliable_only and !segment.delivery_policy.isReliable())
+            continue;
+
+        try segment.write(&writer);
+    }
+
+    // no data to send
+    if (writer.pointer == raknet.datagram.DATAGRAM_HEADER_SIZE) return false;
+
+    try self.endpoint.send(self.io.*, writer.getProcessedBytes());
+
+    return true;
+}
+
+fn allocateDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
+    var writer = try self.pool_allocator.create(raknet.datagram.DatagramMemory);
+    writer.clear();
+    writer.tick = self.current_tick;
+
+    return writer;
 }
 
 const EpochMinHeapElement = struct {
     epoch_id: u32 = 0,
     snapshot_id: u32 = 0,
-    segment: *raknet.datagram.Segment,
+    segment: *Segment,
 
     pub fn compare(a: @This(), b: @This()) bool {
         if (a.epoch_id == b.epoch_id) return a.snapshot_id > b.snapshot_id;
@@ -369,381 +635,41 @@ const Channel = struct {
     heap: ?*EpochMinHeap = null,
 };
 
-// const SequencedIndexableBitQueue = BitWindow(CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE);
-// const ReliabilityIndexableBitQueue = BitWindow(CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE * 4);
-// const ORDERED_CHANNELS_COUNT = 32;
-// const PARALLEL_FRAGMENT_REBUILDERS = 32;
-// const DQueue = std.Deque(*const raknet.datagram.Segment);
-// const EpochMinHeapElement = struct {
-//     epoch_id: u32 = 0,
-//     snapshot_id: u32 = 0,
-//     capsule: *raknet.datagram.Segment,
-//     pub fn compare(a: @This(), b: @This()) bool {
-//         if (a.epoch_id == b.epoch_id) return a.snapshot_id > b.snapshot_id;
-//         return a.epoch_id < b.epoch_id;
-//     }
-// };
+pub fn updateAcknowledge(self: *Connection) !void {
+    var ack_buffer: [1024]u8 = undefined;
+    var nack_buffer: [1024]u8 = undefined;
 
-// const MinHeap = @import("../24/root.zig").HeapArray(EpochMinHeapElement, 127, EpochMinHeapElement.compare);
+    var ack_writer: Writer = .init(&ack_buffer, 0);
+    var ack_count: usize = 0;
+    ack_writer.writeByte(raknet.datagram.ACKNOWLEDGE_PACKED_ID);
+    ack_writer.skip(2);
 
-// // Max 127 unordered packets
-// comptime {
-//     if (@sizeOf(MinHeap) > PoolAllocator.PAGE_SIZE)
-//         @compileError("MinHeap doesn't fits the pool allocator");
-// }
+    var nack_writer: Writer = .init(&nack_buffer, 0);
+    var nack_count: usize = 0;
+    nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
+    nack_writer.skip(2);
 
-// const Connection = @This();
+    var iterator = self.rx_datagram_window.iterator();
+    while (iterator.next()) |range| {
+        const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
+        const counter: *usize = if (range.bit) &ack_count else &nack_count;
+        counter.* = counter.* + 1;
+        try binary.writeRange(writer, .{
+            .min = range.tail,
+            .max = range.head -% 1,
+        });
+    }
 
-// io: *const std.Io,
-// endpoint: Endpoint,
-// guid: u64,
-// connection_state: ConnectionState = .Unconnected,
-// pool_allocator: *PoolAllocator,
-// incoming_acknowledge_queue: SequencedIndexableBitQueue,
-// incoming_fragments: [PARALLEL_FRAGMENT_REBUILDERS]FragmentBuilder,
-// incoming_highest_sequence_indexes: [ORDERED_CHANNELS_COUNT]u32,
-// incoming_ordering_indexes: [ORDERED_CHANNELS_COUNT]u32,
-// incoming_reliability_index_bit_set: ReliabilityIndexableBitQueue,
-// incoming_order_channels: [ORDERED_CHANNELS_COUNT]?*MinHeap,
+    const ack = ack_writer.getProcessedBytes();
+    const nack = nack_writer.getProcessedBytes();
+    ack_writer.pointer = 1;
+    ack_writer.writeInt(u16, @intCast(ack_count), .big);
+    nack_writer.pointer = 1;
+    nack_writer.writeInt(u16, @intCast(nack_count), .big);
+    if (ack.len > 3)
+        try self.endpoint.send(self.io.*, ack);
+    if (nack.len > 3)
+        try self.endpoint.send(self.io.*, nack);
 
-// // Store window for FrameSet that weren't acknowledged
-// memory_window: [CONSTANTS.UNACKNOWLEDGED_WINDOWS_SIZE]?*const raknet.datagram.Segment,
-// send_queue: DQueue,
-// outgoing_sequence_index: u32 = 0,
-
-// pub fn init(self: *Connection, io: *const std.Io, endpoint: Endpoint, guid: u64, pool: *PoolAllocator) !void {
-//     self.* = .{
-//         .io = io,
-//         .guid = guid,
-//         .endpoint = endpoint,
-//         .connection_state = .Unconnected,
-//         .incoming_acknowledge_queue = .{},
-//         .pool_allocator = pool,
-//         .incoming_fragments = @splat(.empty),
-//         .memory_window = @splat(null),
-//         .incoming_highest_sequence_indexes = @splat(0),
-//         .incoming_order_channels = @splat(null),
-//         .incoming_ordering_indexes = @splat(0),
-//         .incoming_reliability_index_bit_set = .{},
-//         .send_queue = undefined,
-//     };
-
-//     const buffer = try pool.alloc(*const raknet.datagram.Segment);
-//     // In case of failed initialization we free the allocated memory
-//     errdefer pool.destroy(buffer);
-//     self.send_queue = .initBuffer(buffer[0..]);
-// }
-
-// pub fn deinit(self: *Connection) void {
-//     self.connection_state = .Disconnected;
-//     self.pool_allocator.destroy(self.send_queue.buffer);
-
-//     // Do not deallocate anything that wasn't allocated in BaseConnection
-//     // Clean up any unprocessed fragments
-//     for (self.incoming_fragments) |*v| {
-//         var iterator = v.iterator();
-//         while (iterator.next()) |c|
-//             self.pool_allocator.destroy(c);
-//     }
-//     for (self.memory_window) |window|
-//         if (window) |w|
-//             self.pool_allocator.destroy(w);
-// }
-
-// pub fn handle(self: *Connection, buffer: []const u8) !void {
-//     if (self.connection_state == .Disconnected) {
-//         @branchHint(.cold);
-//         return;
-//     }
-
-//     // Ack
-//     if (buffer[0] & raknet.datagram.ACKNOWLEDGE_BIT_MASK != 0) {
-//         try handleAck(self, buffer);
-//         return;
-//     }
-
-//     // Nack
-//     if (buffer[0] & raknet.datagram.NOT_ACKNOWLEDGE_BIT_MASK != 0) {
-//         try handleAck(self, buffer);
-//         return;
-//     }
-
-//     try handleFrameSet(self, buffer);
-// }
-
-// fn handleAck(self: *Connection, buffer: []const u8) !void {
-//     _ = self; // autofix
-
-//     var reader: Reader = .init(buffer, 1);
-
-//     const amountOfRanges: u16 = reader.readInt(u16, .big);
-
-//     for (0..amountOfRanges) |_| {
-//         const range = try binary.readRange(&reader);
-
-//         for (range.min..range.max + 1) |j| {
-//             _ = j; // autofix
-//             // TODO
-//         }
-//     }
-
-//     // Remove from memory_window
-// }
-
-// fn handleNack(self: *Connection, buffer: []const u8) !void {
-//     _ = self; // autofix
-
-//     var reader: Reader = .init(buffer, 1);
-
-//     const amountOfRanges: u16 = reader.readInt(u16, .big);
-
-//     for (0..amountOfRanges) |_| {
-//         const range = try binary.readRange(reader);
-
-//         for (range.max..range.min) |j| {
-//             _ = j; // autofix
-//             // TODO
-//         }
-//     }
-//     // pop from memory_window, and resent
-// }
-
-// fn handleFrameSet(self: *Connection, buffer: []const u8) !void {
-//     var reader: Reader = .init(buffer, 1);
-//     try reader.assert(3);
-//     const sequence_index: u32 = binary.readU24LE(&reader);
-//     std.log.info("---------------------------------", .{});
-//     std.log.info("SequenceIndex: {}, size: {}", .{ sequence_index, buffer.len });
-
-//     const last_sequence_index = Utils.fixed(self.incoming_acknowledge_queue.head -% 1);
-//     const distance = Utils.distance(last_sequence_index, sequence_index);
-
-//     // we have probably lost more packets than even client it self remembers
-//     // in that case we just notify disconnect, and remove this connection
-//     //
-//     // ref: BitRingBuffer.reserve first assert
-//     if (distance + @as(i32, @bitCast(self.incoming_acknowledge_queue.len)) > SequencedIndexableBitQueue.RANGE) {
-//         std.log.err("Capacity fail: ", .{});
-//         //TODO:
-//         return;
-//     }
-
-//     // late packets, late packets also covers old duplicates
-//     //
-//     // ref: BitRingBuffer.@etValue first assert sequenceIndex >= tail
-//     if (distance < -@as(i32, @bitCast(self.incoming_acknowledge_queue.len))) {
-//         std.log.err("BitRingBuffer.@etValue first assert sequenceIndex >= tail, d: {}, {}, {}", .{
-//             distance,
-//             self.incoming_acknowledge_queue,
-//             -@as(i32, @bitCast(self.incoming_acknowledge_queue.len)),
-//         });
-//         return;
-//     }
-
-//     // duplicate packets that are yet not acknowledged
-//     //
-//     // ref: BitRingBuffer.@etValue second assert sequenceIndex < head
-//     if (distance <= 0)
-//         if (self.incoming_acknowledge_queue.getValue(sequence_index))
-//             return;
-
-//     // 2 -> 5, 2 packets lost
-//     //
-//     // ref: BitRingBuffer.reserve second assert sIndex >= head
-//     if (distance > 0)
-//         // This call already sets other bits to zero, meaning the packets were lost
-//         self.incoming_acknowledge_queue.reserve(sequence_index);
-
-//     // Set this frame-set as received
-//     //
-//     // ref: BitRingBuffer.@etValue second assert, head = sequenceIndex + 1 => sequenceIndex < head
-//     self.incoming_acknowledge_queue.setValue(sequence_index, true);
-
-//     // gets optimized away
-//     var capsule: raknet.datagram.Segment = undefined;
-//     while (reader.remaining() > 0) {
-//         capsule.read(&reader) catch continue;
-//         std.log.info("CAPSULE; Reliability: {}, data: {any}", .{ capsule.delivery_policy, capsule.body });
-//         handleFrame(self, &capsule) catch continue;
-//     }
-
-//     try updateAcknowledge(self);
-// }
-
-// fn handleFrame(self: *Connection, capsule: *raknet.datagram.Segment) !void {
-//     // f*ck it, just ignore this sus connection behavior
-//     if (capsule.delivery_policy.isSequencedOrdered() and capsule.channel > ORDERED_CHANNELS_COUNT)
-//         return error.ChannelOutOfBounds;
-
-//     if (capsule.delivery_policy.isReliable()) {
-//         const hole = Utils.distance(capsule.reliableIndex, self.incoming_reliability_index_bit_set.head);
-
-//         // We are missing too many packets to recover the connection
-//         // or we got old packet thats too old
-//         if (hole + @as(i32, @bitCast(self.incoming_reliability_index_bit_set.len)) > ReliabilityIndexableBitQueue.RANGE or hole < -%@as(i32, @bitCast(self.incoming_reliability_index_bit_set.len)))
-//             return error.Unrecoverable;
-
-//         // reserve the space
-//         if (hole >= 0) {
-//             self.incoming_reliability_index_bit_set.reserve(capsule.reliableIndex);
-//         } else if (self.incoming_reliability_index_bit_set.getValue(capsule.reliableIndex)) {
-//             // duplicate
-//             return error.Duplicate;
-//         }
-//         self.incoming_reliability_index_bit_set.setValue(capsule.reliableIndex, true);
-
-//         // We got packet as expected
-//         if (hole == 0) {
-//             @branchHint(.likely);
-//             self.incoming_reliability_index_bit_set.head += 1;
-//             self.incoming_reliability_index_bit_set.tail += 1;
-//         } else if (capsule.reliableIndex == self.incoming_reliability_index_bit_set.tail) {
-//             var iterator = self.incoming_reliability_index_bit_set.iterator();
-//             // We check if first range is bit set true in that case we can safely move the tail
-//             if (iterator.next()) |range|
-//                 if (range.bit) {
-//                     const size = Utils.distance(range.tail, range.head);
-//                     self.incoming_reliability_index_bit_set.tail +%= @bitCast(size);
-//                     self.incoming_reliability_index_bit_set.len -%= @bitCast(size);
-//                 };
-//         }
-//     }
-
-//     // The fragment was consumed so we leave early
-//     var ref = capsule;
-//     if (reassemble(self, &ref))
-//         return;
-
-//     const allocated = ref != capsule;
-//     _ = allocated; // autofix
-
-//     //////////////////// MY OWN SEPARATOR FOR SEQUENCE/ORDERED SHIT /////////////////////////////////
-//     const order_distance = Utils.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex);
-//     if (ref.reliability.isSequencedOrdered()) {
-
-//         //ref: Source\ReliabilityLayer.cpp:1282
-//         if (order_distance == 0) {
-//             if (ref.reliability.isSequenced()) {
-//                 // Do we have this implemented? check
-//                 // basically discard any older packets
-//                 if (Utils.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex) >= 0) {
-//                     self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex + 1;
-//                     //TODO: Push packet to receive queue
-//                 }
-//                 return;
-//             }
-
-//             // 128  2048
-
-//             //ref: Source\ReliabilityLayer.cpp:1372
-//             self.incoming_ordering_indexes[ref.orderChannel] = Utils.fixed(ref.orderingIndex + 1);
-//             self.incoming_highest_sequence_indexes[ref.orderChannel] = 0;
-
-//             const heap = self.incoming_order_channels[ref.orderChannel] orelse try self.pool_allocator.create(MinHeap);
-//             while (heap.peek()) |compound| {
-//                 if (compound.epoch_id == self.incoming_ordering_indexes[ref.orderChannel]) {
-//                     const data = heap.pop();
-//                     _ = data; // autofix
-//                     // TODO: push data to the send queue and deallocate
-//                     //ref: Source\ReliabilityLayer.cpp:1416
-//                     if (ref.reliability == .ReliableOrdered) {
-//                         self.incoming_ordering_indexes[ref.orderChannel] = Utils.fixed(ref.orderingIndex + 1);
-//                     } else {
-//                         self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex;
-//                     }
-//                 } else break;
-//             }
-//         } else if (order_distance > 0) {
-//             const heap = self.incoming_order_channels[ref.orderChannel] orelse try self.pool_allocator.create(MinHeap);
-
-//             if (heap.len >= heap.buffer.len) {
-//                 return error.HeapOutOfMemory;
-//             }
-
-//             // We need to allocate and safe the buffer
-//             var new_capsule = try self.pool_allocator.create(raknet.datagram.Segment);
-//             new_capsule.* = ref.*;
-//             new_capsule.body = self.pool_allocator.remaining(raknet.datagram.Segment, new_capsule)[0..ref.body.len];
-//             _ = heap.push(.{ .epoch_id = ref.orderingIndex, .snapshot_id = ref.sequenceIndex, .capsule = new_capsule });
-//             // datas are buffer up but not ready for processing
-//             return;
-//         }
-//     }
-
-//     if (ref.reliability.isSequenced()) {
-//         if (Utils.distance(self.incoming_ordering_indexes[ref.orderChannel], ref.orderingIndex) < 0)
-//             return;
-
-//         if (ref.sequenceIndex < self.incoming_highest_sequence_indexes[ref.orderChannel] or
-//             ref.orderingIndex < self.incoming_ordering_indexes[ref.orderChannel])
-//             return;
-
-//         self.incoming_highest_sequence_indexes[ref.orderChannel] = ref.sequenceIndex + 1;
-//         //HandlePayload(data);
-//         return;
-//     }
-// }
-
-// fn reassemble(self: *Connection, ptr: **raknet.datagram.Segment) bool {
-//     const capsule = ptr.*;
-//     const index: usize = @as(usize, @intCast(capsule.fragment_data.?.id)) % self.incoming_fragments.len;
-//     var ref = &self.incoming_fragments[index];
-//     if (ref.last) |l| {
-//         if (l.fragment_data.?.id != capsule.fragment_data.?.id)
-//             std.debug.panic("TODO: fragments array buffer overflow, should we close the connection??", .{});
-//     }
-
-//     if (!ref.append(capsule)) unreachable;
-//     if (ref.count == capsule.fragment_data.?.count) {
-//         std.debug.panic("TODO: build the fragments together and forward it??", .{});
-//         // + cleanup
-//     }
-
-//     // Rebuild and call handleFrame as well
-//     return false;
-// }
-
-// // This part reads the buffer to separated one, maybe we should move it only to places we need it
-// // var capsule: *FrameSet.CapsuleInfo = self.pool_allocator.create(FrameSet.CapsuleInfo);
-// // const body = self.pool_allocator.remaining(FrameSet.CapsuleInfo, capsule)[0..capsule.body.len];
-// // @memcpy(body, capsule.body);
-// // capsule.body = body;
-
-// fn updateAcknowledge(self: *Connection) !void {
-//     var ack_buffer: [1024]u8 = undefined;
-//     var nack_buffer: [1024]u8 = undefined;
-
-//     var ack_writer: Writer = .init(&ack_buffer, 0);
-//     var ack_count: usize = 0;
-//     ack_writer.writeByte(raknet.datagram.ACKNOWLEDGE_PACKED_ID);
-//     ack_writer.skip(2);
-
-//     var nack_writer: Writer = .init(&nack_buffer, 0);
-//     var nack_count: usize = 0;
-//     nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
-//     nack_writer.skip(2);
-
-//     var iterator = self.incoming_acknowledge_queue.iterator();
-//     while (iterator.next()) |range| {
-//         const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
-//         const counter: *usize = if (range.bit) &ack_count else &nack_count;
-//         counter.* = counter.* + 1;
-//         try binary.writeRange(writer, .{
-//             .min = range.tail,
-//             .max = range.head -% 1,
-//         });
-//     }
-
-//     const ack = ack_writer.getProcessedBytes();
-//     const nack = nack_writer.getProcessedBytes();
-//     ack_writer.pointer = 1;
-//     ack_writer.writeInt(u16, @intCast(ack_count), .big);
-//     nack_writer.pointer = 1;
-//     nack_writer.writeInt(u16, @intCast(nack_count), .big);
-//     if (ack.len > 3)
-//         try self.endpoint.source.send(self.io.*, &self.endpoint.address, ack);
-//     if (nack.len > 3)
-//         try self.endpoint.source.send(self.io.*, &self.endpoint.address, nack);
-
-//     self.incoming_acknowledge_queue.clear();
-// }
+    self.rx_datagram_window.clear();
+}

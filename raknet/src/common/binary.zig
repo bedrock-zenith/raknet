@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const raknet = @import("../data/root.zig");
+const raknet = @import("../protocol/root.zig");
 const common = @import("root.zig");
 
 pub inline fn writeAsserted(comptime T: type, cursor: *common.Writer, value: *const T) !void {
@@ -152,15 +152,24 @@ pub inline fn read(comptime T: type, cursor: *common.Reader, value: *T) !void {
             raknet.RakAddress.Type => try raknet.RakAddress.deserialize(cursor, value),
             else => @compileError("Unsupported union type: " ++ @typeName(T)),
         },
-        .array => if (sizeof(type_info.array.child)) |size| {
-            try cursor.assert(size * type_info.array.len);
-            inline for (value) |*element| {
-                read(type_info.array.child, cursor, element) catch unreachable;
-            }
-        } else |_| {
-            inline for (value) |*element| {
-                try read(type_info.array.child, cursor, element);
-            }
+        .array => switch (@typeInfo(type_info.array.child)) {
+            .int => {
+                for (value) |*element| {
+                    read(type_info.array.child, cursor, element) catch unreachable;
+                }
+            },
+            else => {
+                if (sizeof(type_info.array.child)) |size| {
+                    try cursor.assert(size * type_info.array.len);
+                    inline for (value) |*element| {
+                        read(type_info.array.child, cursor, element) catch unreachable;
+                    }
+                } else |_| {
+                    inline for (value) |*element| {
+                        try read(type_info.array.child, cursor, element);
+                    }
+                }
+            },
         },
         .pointer => switch (type_info.pointer.size) {
             .slice => {
@@ -249,7 +258,7 @@ pub inline fn readRange(cursor: *common.Reader) !raknet.AckRange {
     const isSingle: bool = cursor.readByte() == 1;
     range.min = readU24LE(cursor);
 
-    if (isSingle) {
+    if (!isSingle) {
         try cursor.assert(3);
         range.max = readU24LE(cursor);
     }

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Segment = @import("../data/root.zig").datagram.Segment;
+const Segment = @import("../protocol/root.zig").datagram.Segment;
 
 count: u32 = 0,
 buffer_size: u32 = 0,
@@ -14,7 +14,7 @@ pub fn isEmpty(self: *const @This()) bool {
 
 pub fn append(self: *@This(), segment: *Segment) bool {
     const meta = &(segment.fragment orelse return false);
-    segment.next = null;
+    segment.meta.next = null;
 
     // So the self.last is just an checkpoint in the linked list
     // where anything from first to last is contiguous fragments where next.index == this.index + 1;
@@ -24,21 +24,21 @@ pub fn append(self: *@This(), segment: *Segment) bool {
     if (meta.index == 0) {
         if (self.first != null) return false;
         self.first = segment;
-        segment.next = self.last;
+        segment.meta.next = self.last;
         self.last = segment;
     } else {
-        var last_ptr: *?*Segment = if (self.first) |_| &self.last.?.next else &self.last;
+        var last_ptr: *?*Segment = if (self.first) |_| &self.last.?.meta.next else &self.last;
         var cursor: ?*Segment = last_ptr.*;
 
         while (cursor) |ptr| {
             if (ptr.fragment.?.index == meta.index) return false;
             if (ptr.fragment.?.index > meta.index) break;
 
-            last_ptr = &ptr.next;
-            cursor = ptr.next;
+            last_ptr = &ptr.meta.next;
+            cursor = ptr.meta.next;
         }
 
-        segment.next = cursor;
+        segment.meta.next = cursor;
         last_ptr.* = segment;
     }
 
@@ -47,7 +47,7 @@ pub fn append(self: *@This(), segment: *Segment) bool {
 
     if (self.first != null)
         while (self.last) |last| {
-            if (last.next) |next_node| {
+            if (last.meta.next) |next_node| {
                 if (last.fragment.?.index + 1 == next_node.fragment.?.index) {
                     self.last = next_node;
                     continue;
@@ -63,7 +63,7 @@ pub inline fn iterator(self: *@This()) struct {
     cursor: ?*Segment = null,
     pub inline fn next(this: *@This()) ?*Segment {
         if (this.cursor) |c| {
-            this.cursor = c.next;
+            this.cursor = c.meta.next;
             return c;
         }
         return null;

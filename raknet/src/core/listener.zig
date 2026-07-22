@@ -5,10 +5,10 @@ const meta = common.binary;
 const Reader = common.Reader;
 const Writer = common.Writer;
 const CONSTANTS = @import("../constants.zig");
-const raknet = @import("../data/root.zig");
+const raknet = @import("../protocol/root.zig");
 const IpAddress = raknet.RakAddress.Type;
 const PacketId = raknet.PacketId;
-const offline_packet = @import("../data/root.zig").offline;
+const offline_packet = @import("../protocol/root.zig").offline;
 pub const ClientSession = @import("client-session.zig");
 const Endpoint = @import("endpoint.zig");
 const FramePool = @import("root.zig").FramePool;
@@ -71,7 +71,7 @@ pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) v
 
 fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     if (self.connections.get(endpoint.address)) |connection| {
-        connection.*.connection.receive(buffer) catch {};
+        connection.receive(buffer) catch unreachable;
     }
 }
 
@@ -124,7 +124,7 @@ fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: 
     try sendPacket(self, endpoint, offline_packet.OpenConnectionReplyOne, &.{
         .server_guid = self.guid,
         .security = self.genCookie(endpoint),
-        .mtu_size = @min(@as(u16, @intCast(buffer.len + CONSTANTS.UDP_HEADER_SIZE)), CONSTANTS.MAX_MTU_SIZE), // packet id, magic, version, udp header
+        .mtu_size = @as(u16, @intCast(buffer.len + CONSTANTS.UDP_HEADER_SIZE)), // packet id, magic, version, udp header
     });
 }
 
@@ -144,17 +144,19 @@ fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const
         return;
     }
 
+    const new_mtu = @min(packet.mtu, CONSTANTS.MAX_MTU_SIZE);
     try sendPacket(self, endpoint, offline_packet.OpenConnectionReplyTwo, &.{
         .client_address = endpoint.address,
-        .mtu_size = packet.mtu,
+        .mtu_size = new_mtu,
         .server_guid = self.guid,
     });
 
     const client = try self.allocator.create(ClientSession);
     try client.init(
-        endpoint,
         self,
+        endpoint,
         packet.client_guid,
+        new_mtu,
     );
 
     try self.connections.put(endpoint.address, client);

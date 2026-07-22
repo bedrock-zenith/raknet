@@ -22,5 +22,6 @@ pub const PacketId = enum(u8) {
     DisconnectionNotification = 0x15,
     ConnectionLost = 0x16,
     IncompatibleProtocolVersion = 0x19,
+    GameData = 0xfe,
     _, // This could be unknown packet-type from future versions
 };
