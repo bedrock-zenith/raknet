@@ -29,7 +29,7 @@ io: *const std.Io,
 mtu: u16,
 guid: u64,
 current_tick: usize,
-last_tick: usize,
+rx_last_tick: usize,
 state: ConnectionState,
 endpoint: Endpoint,
 pool_allocator: *PoolAllocator,
@@ -56,7 +56,7 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
         .endpoint = endpoint,
         .pool_allocator = pool,
         .mtu = mtu,
-        .last_tick = 0,
+        .rx_last_tick = 0,
         .current_tick = 0,
 
         // rx
@@ -91,11 +91,12 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
 
 /// This function might and might not free segment data or segment it self
 pub fn deinit(self: *Connection) void {
-    self.connection_state = .Disconnected;
+    const pool = self.pool_allocator;
+    const backing_allocator = &pool.backing_allocator;
 
     var rx_received_iterator = self.rx_received.iterator();
     while (rx_received_iterator.next()) |segment| {
-        destroySegment(self, segment);
+        destroySegment(pool, segment);
     }
 
     self.rx_received.deinit(self.pool_allocator.backing_allocator);
@@ -106,7 +107,18 @@ pub fn deinit(self: *Connection) void {
         if (v.last == null) continue;
         var iterator = v.iterator();
         while (iterator.next()) |segment|
-            destroySegment(self, segment);
+            destroySegment(pool, segment);
+    }
+
+    for (self.rx_channels) |*channel| {
+        if (channel.heap) |heap| {
+            for (0..heap.len) |i| {
+                const segment = heap.buffer[i];
+                destroySegment(pool, segment.segment);
+            }
+
+            backing_allocator.destroy(heap);
+        }
     }
 
     // tx
@@ -115,14 +127,25 @@ pub fn deinit(self: *Connection) void {
         // debug purposes
         if (@import("builtin").mode == .Debug)
             for (0..window.segments_len) |i|
-                std.debug.asset(window.segments[i].meta.alloc.data == .contained);
+                std.debug.assert(window.segments[i].meta.alloc.data == .contained);
 
-        self.pool_allocator.destroy(window);
+        pool.destroy(window);
     };
+
+    inline for (.{ self.tx_buffer_main, self.tx_buffer_urgent }) |*queue| {
+        var iterator = queue.iterator();
+        while (iterator.next()) |window|
+            pool.destroy(window);
+
+        queue.deinit(pool.backing_allocator);
+    }
 }
 
 pub fn tick(self: *Connection, tick_id: usize) !void {
     self.current_tick = tick_id;
+
+    try self.updateAcknowledge();
+
     if (self.tx_datagram_writer) |writer| {
         if (tick_id > writer.tick) {
             _ = try txFlushWriter(self);
@@ -133,6 +156,7 @@ pub fn tick(self: *Connection, tick_id: usize) !void {
 }
 
 pub fn receive(self: *Connection, datagram: []const u8) !void {
+    self.rx_last_tick = self.current_tick;
     if (self.state == .Disconnected) {
         @branchHint(.cold);
         return;
@@ -319,7 +343,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
             // old epoch new snapshot
             if (segment.delivery_policy.hasSnapshot()) {
                 if (Utils.distance(channel.snapshot_index, segment.channel.snapshot_index) < 0) {
-                    destroySegment(self, segment);
+                    destroySegment(self.pool_allocator, segment);
                     // Old snapshots are ignored
                     return;
                 }
@@ -375,7 +399,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
         // should be already discarded by reliability
         // but its good to cover the worse scenarios
         else {
-            destroySegment(self, segment);
+            destroySegment(self.pool_allocator, segment);
             return;
         }
     }
@@ -434,14 +458,14 @@ fn rxFinalize(self: *Connection, segment: *Segment) !void {
 }
 
 /// This function might and might not free segment data or segment it self
-pub fn destroySegment(self: *const Connection, segment: *Segment) void {
+pub fn destroySegment(pool_allocator: *PoolAllocator, segment: *Segment) void {
     switch (segment.meta.alloc.data) {
-        .allocated => self.pool_allocator.backing_allocator.free(segment.body),
+        .allocated => pool_allocator.backing_allocator.free(segment.body),
         .borrowed, .contained => {},
     }
 
     switch (segment.meta.alloc.self) {
-        .allocated => self.pool_allocator.destroy(segment),
+        .allocated => pool_allocator.destroy(segment),
         .borrowed, .contained => {},
     }
 }

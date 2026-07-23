@@ -21,15 +21,36 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Server started with port: {d}", .{bind_address.getPort()});
 
     var receive_buffer: [2048]u8 = undefined;
-    while (true) {
-        const message = socket.receive(io, &receive_buffer) catch |err| switch (err) {
-            else => return err,
-        };
+    const duration: std.Io.Timeout = .{
+        .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(10),
+        },
+    };
 
-        const endpoint: raknet.core.Endpoint = .{
-            .address = message.from,
-            .source = &socket,
-        };
-        listener.receive(message.data, &endpoint);
+    var last_time_tick = Io.Clock.now(.awake, io).toMilliseconds();
+    const TICK_DELTA_TIME = 10;
+    while (true) {
+        const result = socket.receiveTimeout(
+            io,
+            &receive_buffer,
+            duration,
+        );
+
+        if (result) |message| {
+            const endpoint: raknet.core.Endpoint = .{
+                .address = message.from,
+                .source = &socket,
+            };
+            listener.receive(message.data, &endpoint);
+        } else |err| switch (err) {
+            error.Timeout => {},
+            else => return err,
+        }
+
+        if (Io.Clock.now(.awake, io).toMilliseconds() >= last_time_tick + TICK_DELTA_TIME) {
+            last_time_tick +%= TICK_DELTA_TIME;
+            try listener.tick(@intCast(last_time_tick));
+        }
     }
 }

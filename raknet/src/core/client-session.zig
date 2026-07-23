@@ -5,8 +5,11 @@ const Writer = @import("../common/root.zig").Writer;
 const binary = @import("../common/root.zig").binary;
 const raknet = @import("../protocol/root.zig");
 const Connection = @import("connection.zig");
+const destroySegment = @import("connection.zig").destroySegment;
 const Endpoint = @import("endpoint.zig");
 const Listener = @import("listener.zig");
+
+const STALE_SESSION_TIMEOUT_TICKS = 5_000;
 
 const ClientSession = @This();
 connection: Connection,
@@ -40,35 +43,50 @@ pub fn receive(self: *ClientSession, datagram: []const u8) !void {
     try self.connection.receive(datagram);
 
     while (self.connection.rx_received.popFront()) |segment| {
-        try handle(self, segment);
+        try rxSingle(self, segment);
     }
-
-    try self.connection.updateAcknowledge();
-    try self.connection.tick(@intCast(std.Io.Clock.now(.awake, self.connection.io.*).toMilliseconds()));
 }
 
-fn handle(self: *ClientSession, segment: *const raknet.datagram.Segment) !void {
-    var reader: Reader = .init(segment.body, 0);
-    try reader.assert(1);
-    const packet_id: raknet.PacketId = @enumFromInt(reader.readByte());
+pub fn tick(self: *ClientSession, current_tick: usize) !void {
+    if (current_tick > self.connection.rx_last_tick + STALE_SESSION_TIMEOUT_TICKS) {
+        try disconnect(self);
+        return;
+    }
+
+    try self.connection.tick(current_tick);
+}
+
+fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    if (segment.body.len == 0) {
+        destroySegment(self.connection.pool_allocator, segment);
+        return;
+    }
+
+    const packet_id: raknet.PacketId = @enumFromInt(segment.body[0]);
+    std.log.info("packet_id: {}", .{packet_id});
 
     switch (packet_id) {
-        .ConnectionRequest => try handleConnectionRequest(self, &reader),
-        .NewIncomingConnection => try handleNewIncomingConnection(self, &reader),
-        .ConnectedPing => try handleConnectedPing(self, &reader),
-        .DisconnectionNotification => try handleDisconnectionNotification(self, &reader),
-        .GameData => try handleGameData(self, &reader),
-        _ => {},
-        else => return error.UnexpectedPacked,
+        .ConnectionRequest => try rxConnectionRequest(self, segment),
+        .NewIncomingConnection => try rxNewIncomingConnection(self, segment),
+        .ConnectedPing => try rxConnectedPing(self, segment),
+        .DisconnectionNotification => try rxDisconnectionNotification(self, segment),
+        .GameData => try rxGameData(self, segment),
+        _ => destroySegment(self.connection.pool_allocator, segment),
+        else => {
+            destroySegment(self.connection.pool_allocator, segment);
+            return error.UnexpectedPacked;
+        },
     }
-
-    std.log.info("packet_id: {}", .{packet_id});
 }
 
-fn handleConnectionRequest(self: *ClientSession, reader: *Reader) !void {
-    const packet = try readPacket(reader, raknet.online.ConnectionRequest);
+fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    defer destroySegment(self.connection.pool_allocator, segment);
+
+    var reader: Reader = .init(segment.body, 1);
+    const packet = try readPacket(&reader, raknet.online.ConnectionRequest);
 
     if (packet.client_guid != self.connection.guid) {
+        try disconnect(self);
         // todo: disconnect?
     }
 
@@ -86,13 +104,26 @@ fn handleConnectionRequest(self: *ClientSession, reader: *Reader) !void {
     });
 }
 
-fn handleNewIncomingConnection(self: *ClientSession, reader: *Reader) !void {
-    _ = reader;
-    self.connection.state = .Connected;
+pub fn disconnect(self: *ClientSession) !void {
+    _ = self; // autofix
+    // todo: send disconnect packet and force it through
 }
 
-fn handleConnectedPing(self: *ClientSession, reader: *Reader) !void {
-    const packet = try readPacket(reader, raknet.online.ConnectedPing);
+fn rxNewIncomingConnection(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    destroySegment(self.connection.pool_allocator, segment);
+    self.connection.state = .Connected;
+    try self.listener.server_events.pushBack(self.listener.allocator, .{
+        .connection = .{
+            .connection = self,
+        },
+    });
+}
+
+fn rxConnectedPing(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    defer destroySegment(self.connection.pool_allocator, segment);
+
+    var reader: Reader = .init(segment.body, 1);
+    const packet = try readPacket(&reader, raknet.online.ConnectedPing);
 
     try sendInternal(self, raknet.online.ConnectedPong, &.{
         .ping_time = packet.ping_time,
@@ -100,19 +131,26 @@ fn handleConnectedPing(self: *ClientSession, reader: *Reader) !void {
     });
 }
 
-fn handleDisconnectionNotification(self: *ClientSession, reader: *Reader) !void {
-    _ = self; // autofix
-    _ = reader; // autofix
+fn rxDisconnectionNotification(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    defer destroySegment(self.connection.pool_allocator, segment);
+
+    self.connection.state = .Disconnected;
+    _ = self.listener.sessions.remove(self.connection.endpoint.address);
     std.log.debug("Client disconnected", .{});
-    // todo: clear up connection
+
+    try self.listener.server_events.pushBack(self.listener.allocator, .{
+        .disconnection = .{ .connection = self },
+    });
 }
 
-fn handleGameData(self: *ClientSession, reader: *Reader) !void {
-    _ = self; // autofix
-    const minecraft_data = reader.getRemainingBytes();
-    _ = minecraft_data; // autofix
-
-    // forward data or something like that
+fn rxGameData(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
+    try self.listener.server_events.pushBack(self.listener.allocator, .{
+        .message = .{
+            .connection = self,
+            .context = segment,
+            .message = segment.body[1..],
+        },
+    });
 }
 
 fn sendInternal(self: *ClientSession, comptime T: type, value: *const T) !void {

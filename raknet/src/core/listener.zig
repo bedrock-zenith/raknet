@@ -15,12 +15,12 @@ const FramePool = @import("root.zig").FramePool;
 pub const ListenerEvent = @import("server-events.zig").ListenerEvent;
 
 const Listener = @This();
-const ListenerEventQueue = std.Deque(*const ListenerEvent);
+const ListenerEventQueue = std.Deque(ListenerEvent);
 
 guid: u64,
 io: *const std.Io,
 allocator: std.mem.Allocator,
-connections: std.AutoHashMap(IpAddress, *ClientSession),
+sessions: std.AutoHashMap(IpAddress, *ClientSession),
 pool_allocator: FramePool,
 motd: []const u8,
 secret_key: [16]u8,
@@ -32,7 +32,7 @@ pub fn init(self: *Listener, io: *const std.Io, allocator: std.mem.Allocator) !v
         .io = io,
         .allocator = allocator,
         .guid = xiro.next(),
-        .connections = .init(allocator),
+        .sessions = .init(allocator),
         .pool_allocator = try .init(allocator), // 131072
         .motd = "",
         .secret_key = undefined,
@@ -51,12 +51,12 @@ pub fn deinit(self: *Listener) void {
     self.server_events.deinit(self.allocator);
     self.frame_pool.deinit(self.allocator);
 
-    var iterator = self.connections.valueIterator();
+    var iterator = self.sessions.valueIterator();
     while (iterator.next()) |value| {
         value.*.deinit();
         self.allocator.free(value.*);
     }
-    self.connections.deinit();
+    self.sessions.deinit();
 }
 
 pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
@@ -69,8 +69,30 @@ pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) v
         self.offline(buffer, endpoint);
 }
 
+pub inline fn dequeueEvent(self: *Listener) ?ListenerEvent {
+    return self.server_events.popFront();
+}
+
+pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
+    switch (event) {
+        .message => |message| {
+            @import("connection.zig").destroySegment(self.pool_allocator, message.context);
+        },
+        .disconnection => |message| {
+            message.connection.deinit();
+        },
+    }
+}
+
+pub fn tick(self: *Listener, current_tick: usize) !void {
+    var iterator = self.sessions.valueIterator();
+    while (iterator.next()) |session| {
+        try session.*.tick(current_tick);
+    }
+}
+
 fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
-    if (self.connections.get(endpoint.address)) |connection| {
+    if (self.sessions.get(endpoint.address)) |connection| {
         connection.receive(buffer) catch unreachable;
     }
 }
@@ -78,13 +100,13 @@ fn online(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
 fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
     const packet_id: PacketId = .from(buffer[0]);
     (switch (packet_id) {
-        .UnconnectedPing => handleUnconnectedPing(self, buffer, endpoint),
-        .OpenConnectionRequestOne => handleOpenConnectionOne(self, buffer, endpoint),
-        .OpenConnectionRequestTwo => handleOpenConnectionTwo(self, buffer, endpoint),
+        .UnconnectedPing => rxUnconnectedPing(self, buffer, endpoint),
+        .OpenConnectionRequestOne => rxOpenConnectionOne(self, buffer, endpoint),
+        .OpenConnectionRequestTwo => rxOpenConnectionTwo(self, buffer, endpoint),
         .DisconnectionNotification => {
-            if (self.connections.getEntry(endpoint.address)) |entry| {
+            if (self.sessions.getEntry(endpoint.address)) |entry| {
                 if (entry.value_ptr.*.*.connection.state == .Unconnected)
-                    self.connections.removeByPtr(entry.key_ptr);
+                    self.sessions.removeByPtr(entry.key_ptr);
             }
         },
         _ => std.log.err("Unknown packet, size: {d}, packet_id: {d}", .{ buffer.len, buffer[0] }),
@@ -93,7 +115,7 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void 
         std.debug.print("debug: Failed process {s}", .{@tagName(packet_id)});
 }
 
-fn handleUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
+fn rxUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
     const packet = try readPacket(buffer, offline_packet.UnconnectedPing);
     try sendPacket(self, endpoint, offline_packet.UnconnectedPong, &.{
         .ping_time = packet.ping_time,
@@ -102,8 +124,8 @@ fn handleUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *c
     });
 }
 
-fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
-    if (self.connections.get(endpoint.address)) |connection| {
+fn rxOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
+    if (self.sessions.get(endpoint.address)) |connection| {
         try sendPacket(self, endpoint, offline_packet.AlreadyConnected, &.{
             .client_guid = connection.connection.guid,
         });
@@ -128,8 +150,8 @@ fn handleOpenConnectionOne(self: *const Listener, buffer: []const u8, endpoint: 
     });
 }
 
-fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
-    if (self.connections.get(endpoint.address)) |connection| {
+fn rxOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) !void {
+    if (self.sessions.get(endpoint.address)) |connection| {
         try sendPacket(self, endpoint, offline_packet.AlreadyConnected, &.{
             .client_guid = connection.connection.guid,
         });
@@ -159,7 +181,7 @@ fn handleOpenConnectionTwo(self: *Listener, buffer: []const u8, endpoint: *const
         new_mtu,
     );
 
-    try self.connections.put(endpoint.address, client);
+    try self.sessions.put(endpoint.address, client);
 }
 
 fn genCookie(self: *const Listener, endpoint: *const Endpoint) u32 {
