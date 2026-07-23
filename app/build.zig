@@ -54,6 +54,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+
+    exe.root_module.addImport("zio", zio.module("zio"));
+
     if (strip) |available| {
         if (available)
             exe.root_module.strip = true;

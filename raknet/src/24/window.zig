@@ -54,7 +54,7 @@ pub fn Window(comptime T: type, comptime range: comptime_int) type {
             return .{
                 .ref = self,
                 .curr_seq = self.tail,
-                .remaining = self.len,
+                .remaining = @intCast(self.len),
             };
         }
 
@@ -66,7 +66,7 @@ pub fn Window(comptime T: type, comptime range: comptime_int) type {
             pub fn next(self: *Iterator) ?T {
                 if (self.remaining == 0) return null;
 
-                const value = self.ref.getValue(self.curr_seq);
+                const value = self.ref.buffer[self.curr_seq % self.ref.buffer.len];
                 self.remaining -= 1;
                 self.curr_seq = Utils.fixed(self.curr_seq +% 1);
 

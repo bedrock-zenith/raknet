@@ -105,13 +105,17 @@ fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) 
 }
 
 pub fn disconnect(self: *ClientSession) !void {
-    _ = self; // autofix
     // todo: send disconnect packet and force it through
+
+    try self.listener.server_events.pushBack(self.listener.allocator, .{
+        .disconnection = .{ .connection = self },
+    });
 }
 
 fn rxNewIncomingConnection(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
     destroySegment(self.connection.pool_allocator, segment);
     self.connection.state = .Connected;
+    std.log.debug("connected", .{});
     try self.listener.server_events.pushBack(self.listener.allocator, .{
         .connection = .{
             .connection = self,

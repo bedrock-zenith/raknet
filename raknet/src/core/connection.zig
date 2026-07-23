@@ -56,7 +56,7 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
         .endpoint = endpoint,
         .pool_allocator = pool,
         .mtu = mtu,
-        .rx_last_tick = 0,
+        .rx_last_tick = std.math.maxInt(usize) >> 1,
         .current_tick = 0,
 
         // rx
@@ -103,14 +103,14 @@ pub fn deinit(self: *Connection) void {
 
     // Do not deallocate anything that wasn't allocated in BaseConnection
     // Clean up any unprocessed fragments
-    for (self.rx_fragment_builder) |*v| {
+    for (&self.rx_fragment_builder) |*v| {
         if (v.last == null) continue;
         var iterator = v.iterator();
         while (iterator.next()) |segment|
             destroySegment(pool, segment);
     }
 
-    for (self.rx_channels) |*channel| {
+    for (&self.rx_channels) |*channel| {
         if (channel.heap) |heap| {
             for (0..heap.len) |i| {
                 const segment = heap.buffer[i];
@@ -132,7 +132,7 @@ pub fn deinit(self: *Connection) void {
         pool.destroy(window);
     };
 
-    inline for (.{ self.tx_buffer_main, self.tx_buffer_urgent }) |*queue| {
+    inline for (.{ &self.tx_buffer_main, &self.tx_buffer_urgent }) |queue| {
         var iterator = queue.iterator();
         while (iterator.next()) |window|
             pool.destroy(window);
@@ -147,9 +147,11 @@ pub fn tick(self: *Connection, tick_id: usize) !void {
     try self.updateAcknowledge();
 
     if (self.tx_datagram_writer) |writer| {
-        if (tick_id > writer.tick) {
-            _ = try txFlushWriter(self);
-        }
+        if (writer.segments_len > 0)
+            if (tick_id > writer.tick + 5) {
+                std.log.info("flush", .{});
+                _ = try txFlushWriter(self);
+            };
     }
 
     _ = try txFlush(self);
@@ -603,7 +605,7 @@ fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
 }
 
 /// Returns true if state changed
-fn txFlush(self: *Connection) !bool {
+pub fn txFlush(self: *Connection) !bool {
     _ = try txFlushWriter(self);
     var flushed = false;
     while (self.tx_datagram_window.available() != 0) {
@@ -637,7 +639,7 @@ fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory,
     var buffer: [2048]u8 = undefined;
     var writer: Writer = .init(&buffer, 0);
 
-    writer.writeByte(raknet.datagram.DATAGRAM_BIT_MASK);
+    writer.writeByte(raknet.datagram.DATAGRAM_BIT_MASK | 4);
     binary.writeU24LE(&writer, datagram_index);
 
     for (0..datagram.segments_len) |i| {

@@ -76,11 +76,12 @@ pub inline fn dequeueEvent(self: *Listener) ?ListenerEvent {
 pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
     switch (event) {
         .message => |message| {
-            @import("connection.zig").destroySegment(self.pool_allocator, message.context);
+            @import("connection.zig").destroySegment(&self.pool_allocator, @ptrCast(@alignCast(@constCast(message.context))));
         },
         .disconnection => |message| {
             message.connection.deinit();
         },
+        .connection => {},
     }
 }
 
