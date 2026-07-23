@@ -15,7 +15,7 @@ const FramePool = @import("root.zig").FramePool;
 pub const ListenerEvent = @import("server-events.zig").ListenerEvent;
 
 const Listener = @This();
-const ListenerEventQueue = std.Deque(ListenerEvent);
+const ListenerEventQueue = std.Deque(*const ListenerEvent);
 
 guid: u64,
 io: *const std.Io,

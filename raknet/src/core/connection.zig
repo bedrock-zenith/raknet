@@ -38,7 +38,7 @@ rx_datagram_window: DatagramWindow,
 rx_reliable_window: ReliableWindow,
 rx_fragment_builder: [PARALLEL_FRAGMENT_BUILDERS]FragmentBuilder,
 rx_channels: [CHANNELS_COUNT]Channel,
-rx_received: std.Deque(*const Segment),
+rx_received: std.Deque(*Segment),
 
 tx_reliable_index: u32,
 tx_fragment_index: u16,
@@ -89,12 +89,13 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
     errdefer self.tx_buffer_urgent.deinit(pool.backing_allocator);
 }
 
+/// This function might and might not free segment data or segment it self
 pub fn deinit(self: *Connection) void {
     self.connection_state = .Disconnected;
 
     var rx_received_iterator = self.rx_received.iterator();
     while (rx_received_iterator.next()) |segment| {
-        freeSegment(self, segment);
+        destroySegment(self, segment);
     }
 
     self.rx_received.deinit(self.pool_allocator.backing_allocator);
@@ -105,12 +106,17 @@ pub fn deinit(self: *Connection) void {
         if (v.last == null) continue;
         var iterator = v.iterator();
         while (iterator.next()) |segment|
-            self.pool_allocator.destroy(segment);
+            destroySegment(self, segment);
     }
 
     // tx
     var tx_datagram_window_iterator = self.tx_datagram_window.iterator();
     while (tx_datagram_window_iterator.next()) |item| if (item) |window| {
+        // debug purposes
+        if (@import("builtin").mode == .Debug)
+            for (0..window.segments_len) |i|
+                std.debug.asset(window.segments[i].meta.alloc.data == .contained);
+
         self.pool_allocator.destroy(window);
     };
 }
@@ -164,7 +170,7 @@ fn rxAcknowledge(self: *Connection, datagram: []const u8) !void {
                 if (is_nack) {
                     try self.tx_buffer_urgent.pushBack(self.pool_allocator.backing_allocator, datagram_element);
                 } else {
-                    self.pool_allocator.destroy(@constCast(datagram_element));
+                    self.pool_allocator.destroy(datagram_element);
                 }
             }
         }
@@ -239,7 +245,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     var segment: Segment = undefined;
     while (reader.remaining() > 0) {
         segment.read(&reader) catch continue;
-        segment.meta.alloc = .Stack;
+        segment.meta.alloc = .{ .data = .borrowed, .self = .borrowed };
         rxSegment(self, &segment) catch |err| switch (err) {
             error.ChannelOutOfBounds => continue,
             else => return err,
@@ -247,60 +253,16 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     }
 }
 
-fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: *Segment) !?*Segment {
-    const builder_index = fragment.id % PARALLEL_FRAGMENT_BUILDERS;
-
-    const builder = &self.rx_fragment_builder[builder_index];
-    if (builder.last) |last| {
-        if (last.fragment.?.id != fragment.id) return error.FragmentBuilderOutOfMemory;
-    }
-
-    defer {
-        if (fragment.count == builder.count) builder.* = .{};
-    }
-
-    errdefer {
-        var iterator = builder.iterator();
-        while (iterator.next()) |seg| {
-            self.pool_allocator.destroy(seg);
-        }
-    }
-
-    const segment = try cloneSegment(self, input_segment);
-    _ = builder.append(segment);
-
-    if (fragment.count == builder.count) {
-        var iterator = builder.iterator();
-        var buffer = try self.pool_allocator.backing_allocator.alloc(u8, builder.buffer_size);
-
-        var offset: usize = 0;
-        while (iterator.next()) |seg| {
-            @memcpy(buffer[offset .. offset + seg.body.len], seg.body);
-            offset += seg.body.len;
-            if (seg != segment)
-                self.pool_allocator.destroy(seg);
-        }
-
-        input_segment.* = segment.*;
-        segment.body = buffer;
-        segment.meta.alloc = .External;
-        return segment;
-    }
-
-    return null;
-}
-
-fn rxSegment(self: *Connection, data: *Segment) !void {
-    var segment = data;
+fn rxSegment(self: *Connection, input: *const Segment) !void {
 
     // f*ck it, just ignore this sus connection behavior
-    if (segment.delivery_policy.hasEpochOrSnapshot() and segment.channel.id > CHANNELS_COUNT)
+    if (input.delivery_policy.hasEpochOrSnapshot() and input.channel.id > CHANNELS_COUNT)
         return error.ChannelOutOfBounds;
 
     ////////// RELIABILITY SHI //////////
 
-    if (segment.delivery_policy.isReliable()) {
-        const hole = Utils.distance(self.rx_reliable_window.head, segment.reliable_index);
+    if (input.delivery_policy.isReliable()) {
+        const hole = Utils.distance(self.rx_reliable_window.head, input.reliable_index);
 
         // We are missing too many packets to recover the connection
         // or we got old packet thats too old
@@ -312,12 +274,12 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
 
         // reserve enough space
         if (hole >= 0)
-            self.rx_reliable_window.reserve(segment.reliable_index);
+            self.rx_reliable_window.reserve(input.reliable_index);
 
         // check for duplicates
-        if (self.rx_reliable_window.getValue(segment.reliable_index)) return;
+        if (self.rx_reliable_window.getValue(input.reliable_index)) return;
 
-        self.rx_reliable_window.setValue(segment.reliable_index, true);
+        self.rx_reliable_window.setValue(input.reliable_index, true);
 
         // We got packet as expected
         if (hole == 0) {
@@ -329,7 +291,7 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
         // clean and slice the window
         // we check if first range is bit set true
         // in that case we can safely move the tail
-        else if (segment.reliable_index == self.rx_reliable_window.tail) {
+        else if (input.reliable_index == self.rx_reliable_window.tail) {
             var iterator = self.rx_reliable_window.iterator();
             if (iterator.next()) |range|
                 if (range.bit) {
@@ -342,9 +304,11 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
 
     ////////// FRAGMENT SHI //////////
 
-    if (segment.fragment) |fragment| {
-        segment = try rxFragment(self, fragment, segment) orelse return;
-    }
+    var segment: *Segment = undefined;
+    if (input.fragment) |fragment| {
+        segment = try rxFragment(self, fragment, input) orelse
+            try allocSegment(self, input);
+    } else segment = try allocSegment(self, input);
 
     ////////// EPOCH & SNAPSHOT SHI //////////
 
@@ -354,12 +318,13 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
         if (epoch_distance == 0) {
             // old epoch new snapshot
             if (segment.delivery_policy.hasSnapshot()) {
-                if (Utils.distance(channel.snapshot_index, segment.channel.snapshot_index) < 0)
+                if (Utils.distance(channel.snapshot_index, segment.channel.snapshot_index) < 0) {
+                    destroySegment(self, segment);
                     // Old snapshots are ignored
                     return;
+                }
 
                 channel.snapshot_index = Utils.fixed(segment.channel.snapshot_index +% 1);
-
                 try rxFinalize(self, segment);
                 return;
             }
@@ -381,7 +346,7 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
 
                     last_snapshot_id = element.snapshot_id;
 
-                    try rxFinalize(self, segment);
+                    try rxFinalize(self, element.segment);
                 }
                 break;
             }
@@ -397,14 +362,22 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
                 break :return_heap new_heap;
             };
 
-            // reallocate to heap
-            const allocated = if (segment != data) segment else try cloneSegment(self, segment);
-            _ = heap.push(.{ .epoch_id = segment.channel.epoch_index, .snapshot_id = segment.channel.snapshot_index, .segment = allocated });
+            _ = heap.push(.{
+                .epoch_id = segment.channel.epoch_index,
+                .snapshot_id = segment.channel.snapshot_index,
+                .segment = segment,
+            });
+
             return;
         }
 
         // old epoch that was already resolved
-        else return;
+        // should be already discarded by reliability
+        // but its good to cover the worse scenarios
+        else {
+            destroySegment(self, segment);
+            return;
+        }
     }
 
     ////////// UNRELIABLE SHI //////////
@@ -412,26 +385,75 @@ fn rxSegment(self: *Connection, data: *Segment) !void {
     try rxFinalize(self, segment);
 }
 
-fn rxFinalize(self: *Connection, segment: *const Segment) !void {
-    const allocated = if (segment.meta.alloc == .Stack) try cloneSegment(self, segment) else segment;
-    try self.rx_received.pushBack(self.pool_allocator.backing_allocator, allocated);
+fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: *const Segment) !?*Segment {
+    const builder_index = fragment.id % PARALLEL_FRAGMENT_BUILDERS;
+
+    const builder = &self.rx_fragment_builder[builder_index];
+    if (builder.last) |last| {
+        if (last.fragment.?.id != fragment.id) return error.FragmentBuilderOutOfMemory;
+    }
+
+    defer {
+        if (fragment.count == builder.count) builder.* = .{};
+    }
+
+    errdefer {
+        var iterator = builder.iterator();
+        while (iterator.next()) |seg| {
+            self.pool_allocator.destroy(seg);
+        }
+    }
+
+    const segment = try allocSegment(self, input_segment);
+    _ = builder.append(segment);
+
+    if (fragment.count == builder.count) {
+        var iterator = builder.iterator();
+        var buffer = try self.pool_allocator.backing_allocator.alloc(u8, builder.buffer_size);
+
+        var offset: usize = 0;
+        while (iterator.next()) |seg| {
+            @memcpy(buffer[offset .. offset + seg.body.len], seg.body);
+            offset += seg.body.len;
+            if (seg != segment)
+                self.pool_allocator.destroy(seg);
+        }
+
+        // we assert from lines above that body is self_contained as segment was allocated
+        segment.body = buffer;
+        segment.meta.alloc.data = .allocated;
+        return segment;
+    }
+
+    return null;
 }
 
-fn freeSegment(self: *const Connection, segment: *const Segment) !void {
-    if (segment.fragment) |_|
-        self.pool_allocator.backing_allocator.destroy(segment.body.ptr);
-
-    self.pool_allocator.destroy(segment);
+fn rxFinalize(self: *Connection, segment: *Segment) !void {
+    std.debug.assert(segment.meta.alloc.self == .allocated);
+    try self.rx_received.pushBack(self.pool_allocator.backing_allocator, segment);
 }
 
-fn cloneSegment(self: *const Connection, segment: *const Segment) !*Segment {
+/// This function might and might not free segment data or segment it self
+pub fn destroySegment(self: *const Connection, segment: *Segment) void {
+    switch (segment.meta.alloc.data) {
+        .allocated => self.pool_allocator.backing_allocator.free(segment.body),
+        .borrowed, .contained => {},
+    }
+
+    switch (segment.meta.alloc.self) {
+        .allocated => self.pool_allocator.destroy(segment),
+        .borrowed, .contained => {},
+    }
+}
+
+fn allocSegment(self: *const Connection, segment: *const Segment) !*Segment {
     var allocated_segment = try self.pool_allocator.create(Segment);
     allocated_segment.* = segment.*;
 
     const bytes = self.pool_allocator.remaining(Segment, allocated_segment)[0..segment.body.len];
     allocated_segment.body = bytes;
     @memcpy(bytes, segment.body);
-    allocated_segment.meta.alloc = .SelfContained;
+    allocated_segment.meta.alloc = .{ .data = .contained, .self = .allocated };
     return allocated_segment;
 }
 
@@ -457,7 +479,14 @@ pub fn send(self: *Connection, data: []const u8) !void {
         .body = data,
 
         // Unused
-        .meta = undefined,
+        .meta = .{
+            .alloc = .{
+                // stack-allocated, we don't want to be freed or lost
+                .self = .borrowed,
+                // its data are literally borrowed
+                .data = .borrowed,
+            },
+        },
         .reliable_index = undefined,
     };
 
@@ -474,7 +503,7 @@ pub fn send(self: *Connection, data: []const u8) !void {
             self.tx_reliable_index = Utils.fixed(self.tx_reliable_index +% 1);
         }
 
-        try txQueue(self, segment);
+        try txQueue(self, &segment);
         return;
     }
 
@@ -502,13 +531,13 @@ pub fn send(self: *Connection, data: []const u8) !void {
         const offset_end = @min(max_chunk_size * (index +% 1), data.len);
         segment.body = data[offset..offset_end];
 
-        try txQueue(self, segment);
+        try txQueue(self, &segment);
     }
 }
 
-fn txQueue(self: *Connection, segment: Segment) !void {
+fn txQueue(self: *Connection, segment: *const Segment) !void {
     var tx_writer = self.tx_datagram_writer orelse alloc: {
-        const new = try allocateDatagramMemory(self);
+        const new = try allocDatagramMemory(self);
         self.tx_datagram_writer = new;
         break :alloc new;
     };
@@ -522,13 +551,14 @@ fn txQueue(self: *Connection, segment: Segment) !void {
     }
 
     const index = tx_writer.segments_len;
-    tx_writer.segments[index] = segment;
+    tx_writer.segments[index] = segment.*;
     tx_writer.segments_len = index +% 1;
 
     const new_buffer = tx_writer.buffer[tx_writer.offset..][0..segment.body.len];
     @memcpy(new_buffer, segment.body);
     tx_writer.segments[index].body = new_buffer;
-    tx_writer.segments[index].meta.alloc = .Borrowed;
+    // both data and segments are part of the same memory block inside the datagram_memory structure
+    tx_writer.segments[index].meta.alloc = .{ .data = .contained, .self = .contained };
     tx_writer.offset +%= new_buffer.len;
 
     if (tx_writer.segments_len >= tx_writer.segments.len)
@@ -537,19 +567,20 @@ fn txQueue(self: *Connection, segment: Segment) !void {
 
 fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
     var tx_writer = self.tx_datagram_writer orelse {
-        const txw = try allocateDatagramMemory(self);
+        const txw = try allocDatagramMemory(self);
         self.tx_datagram_writer = txw;
         return txw;
     };
 
     try self.tx_buffer_main.pushBack(self.pool_allocator.backing_allocator, tx_writer);
-    tx_writer = try allocateDatagramMemory(self);
+    tx_writer = try allocDatagramMemory(self);
     self.tx_datagram_writer = tx_writer;
     return tx_writer;
 }
 
 /// Returns true if state changed
 fn txFlush(self: *Connection) !bool {
+    _ = try txFlushWriter(self);
     var flushed = false;
     while (self.tx_datagram_window.available() != 0) {
         var reliable_only = false;
@@ -563,13 +594,13 @@ fn txFlush(self: *Connection) !bool {
             data_memory = data;
         } else break;
 
-        errdefer self.pool_allocator.destroy(@constCast(data_memory));
+        errdefer self.pool_allocator.destroy(data_memory);
 
         if (try txRawSend(self, data_memory, self.tx_datagram_window.head, reliable_only)) {
             data_memory.tick = self.current_tick;
             _ = self.tx_datagram_window.push(data_memory);
         } else {
-            self.pool_allocator.destroy(@constCast(data_memory));
+            self.pool_allocator.destroy(data_memory);
         }
 
         flushed = true;
@@ -602,38 +633,13 @@ fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory,
     return true;
 }
 
-fn allocateDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
+fn allocDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
     var writer = try self.pool_allocator.create(raknet.datagram.DatagramMemory);
     writer.clear();
     writer.tick = self.current_tick;
 
     return writer;
 }
-
-const EpochMinHeapElement = struct {
-    epoch_id: u32 = 0,
-    snapshot_id: u32 = 0,
-    segment: *Segment,
-
-    pub fn compare(a: @This(), b: @This()) bool {
-        if (a.epoch_id == b.epoch_id) return a.snapshot_id > b.snapshot_id;
-        return a.epoch_id < b.epoch_id;
-    }
-};
-
-const EpochMinHeap = @import("../24/root.zig").HeapArray(EpochMinHeapElement, 127, EpochMinHeapElement.compare);
-
-// Max 127 unordered packets
-comptime {
-    if (@sizeOf(EpochMinHeap) > PoolAllocator.PAGE_SIZE)
-        @compileError("MinHeap doesn't fits the pool allocator");
-}
-
-const Channel = struct {
-    epoch_index: u32 = 0,
-    snapshot_index: u32 = 0,
-    heap: ?*EpochMinHeap = null,
-};
 
 pub fn updateAcknowledge(self: *Connection) !void {
     var ack_buffer: [1024]u8 = undefined;
@@ -673,3 +679,28 @@ pub fn updateAcknowledge(self: *Connection) !void {
 
     self.rx_datagram_window.clear();
 }
+
+const EpochMinHeapElement = struct {
+    epoch_id: u32 = 0,
+    snapshot_id: u32 = 0,
+    segment: *Segment,
+
+    pub fn compare(a: @This(), b: @This()) bool {
+        if (a.epoch_id == b.epoch_id) return a.snapshot_id > b.snapshot_id;
+        return a.epoch_id < b.epoch_id;
+    }
+};
+
+const EpochMinHeap = @import("../24/root.zig").HeapArray(EpochMinHeapElement, 127, EpochMinHeapElement.compare);
+
+// Max 127 unordered packets
+comptime {
+    if (@sizeOf(EpochMinHeap) > PoolAllocator.PAGE_SIZE)
+        @compileError("MinHeap doesn't fits the pool allocator");
+}
+
+const Channel = struct {
+    epoch_index: u32 = 0,
+    snapshot_index: u32 = 0,
+    heap: ?*EpochMinHeap = null,
+};

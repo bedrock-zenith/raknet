@@ -12,10 +12,21 @@ pub const DATAGRAM_HEADER_SIZE = 4; // packet id + datagram id u24le
 pub const BIT_MASK = 0b1000_0000;
 const FRAGMENTED_BIT = 0x10;
 
+pub const AllocInfo = packed struct(u8) {
+    self: AllocFlag = .borrowed,
+    data: AllocFlag = .borrowed,
+};
+
+pub const AllocFlag = enum(u4) {
+    borrowed,
+    allocated,
+    contained,
+};
+
 pub const Segment = struct {
     pub const MetaInfo = struct {
         next: ?*Segment = null,
-        alloc: enum { Unknown, Borrowed, SelfContained, External, Stack } = .Unknown,
+        alloc: AllocInfo = .{},
     };
 
     pub const FragmentInfo = struct {

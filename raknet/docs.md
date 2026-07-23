@@ -1,3 +1,7 @@
+### alloc/free conventions
+
+functions that accepts immutable constants should never free this memory of the ptr
+
 ### naming conventions
 
  <!-- lets not be that explicit, so that why shit is supposed to be shi only -->
