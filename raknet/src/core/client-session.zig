@@ -9,7 +9,7 @@ const destroySegment = @import("connection.zig").destroySegment;
 const Endpoint = @import("endpoint.zig");
 const Listener = @import("listener.zig");
 
-const STALE_SESSION_TIMEOUT_TICKS = 5_000;
+const STALE_SESSION_TIMEOUT_TICKS = 10_000;
 
 const ClientSession = @This();
 connection: Connection,
@@ -30,6 +30,7 @@ pub fn init(
         listener.io,
         &listener.pool_allocator,
         endpoint.*,
+        listener.last_tick,
         guid,
         mtu,
     );
@@ -49,6 +50,7 @@ pub fn receive(self: *ClientSession, datagram: []const u8) !void {
 
 pub fn tick(self: *ClientSession, current_tick: usize) !void {
     if (current_tick > self.connection.rx_last_tick + STALE_SESSION_TIMEOUT_TICKS) {
+        std.log.debug("stale session", .{});
         try disconnect(self);
         return;
     }
@@ -108,17 +110,16 @@ pub fn disconnect(self: *ClientSession) !void {
     // todo: send disconnect packet and force it through
 
     try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .disconnection = .{ .connection = self },
+        .disconnected = .{ .session = self },
     });
 }
 
 fn rxNewIncomingConnection(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
     destroySegment(self.connection.pool_allocator, segment);
     self.connection.state = .Connected;
-    std.log.debug("connected", .{});
     try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .connection = .{
-            .connection = self,
+        .connected = .{
+            .session = self,
         },
     });
 }
@@ -139,18 +140,15 @@ fn rxDisconnectionNotification(self: *ClientSession, segment: *raknet.datagram.S
     defer destroySegment(self.connection.pool_allocator, segment);
 
     self.connection.state = .Disconnected;
-    _ = self.listener.sessions.remove(self.connection.endpoint.address);
-    std.log.debug("Client disconnected", .{});
-
     try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .disconnection = .{ .connection = self },
+        .disconnected = .{ .session = self },
     });
 }
 
 fn rxGameData(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
     try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .message = .{
-            .connection = self,
+        .messaged = .{
+            .session = self,
             .context = segment,
             .message = segment.body[1..],
         },

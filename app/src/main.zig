@@ -24,6 +24,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
 
     var listener: Listener = undefined;
     try listener.init(&io, gpa);
+    defer listener.deinit();
 
     const motd = try std.fmt.allocPrint(gpa, "MCPE;Dedicated Server;527;1.19.1;0;10;{d};Bedrock level;Survival;1;", .{listener.guid});
     defer gpa.free(motd);
@@ -36,14 +37,15 @@ pub fn main(_: std.process.Init.Minimal) !void {
     const duration: std.Io.Timeout = .{
         .duration = .{
             .clock = .awake,
-            .raw = .fromMilliseconds(10),
+            .raw = .fromMilliseconds(20),
         },
     };
 
     var last_time_tick = Io.Clock.now(.awake, io).toMilliseconds();
-    const TICK_DELTA_TIME = 10;
+    const TICK_DELTA_TIME = 20;
 
-    while (true) {
+    var loop = true;
+    while (loop) {
         const result = socket.receiveTimeout(io, &receive_buffer, duration);
 
         if (result) |message| {
@@ -51,24 +53,31 @@ pub fn main(_: std.process.Init.Minimal) !void {
                 .address = message.from,
                 .source = &socket,
             };
-            listener.receive(message.data, &endpoint);
+            listener.receive(message.data, &endpoint, @intCast(last_time_tick));
         } else |err| switch (err) {
             error.Timeout => {},
             else => return err,
         }
 
         while (listener.dequeueEvent()) |event| {
+            defer listener.returnEvent(event);
             switch (event) {
-                .connection => std.log.info("Client connected on ###.###.###.###:{}", .{
-                    event.connection.connection.connection.endpoint.address.getPort(),
+                .connected => |info| std.log.info("Client connected on ###.###.###.###:{}", .{
+                    info.session.connection.endpoint.address.getPort(),
                 }),
-                .disconnection => std.log.info("Client connected on ###.###.###.###:{}", .{
-                    event.disconnection.connection.connection.endpoint.address.getPort(),
-                }),
-                .message => |info| {
-                    std.log.info("message: {any}", .{info.message});
-                    _ = try info.connection.connection.txFlush();
-                    try info.connection.connection.send(&.{ 0xfe, 0x0c, 0x8f, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+                .disconnected => |info| {
+                    std.log.info("Client disconnected on ###.###.###.###:{}", .{
+                        info.session.connection.endpoint.address.getPort(),
+                    });
+
+                    loop = false;
+                },
+                .messaged => |message| {
+                    std.log.info("message: {any}", .{message.message});
+
+                    // Reply with own network setting packet to the network settings request packet
+                    // contains gameheader, size of payload, packet id in varint format and packet data
+                    try message.session.connection.send(&.{ 0xfe, 0x0c, 0x8f, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
 
                     // 0020   84 03 00 00 60 00 70 01 00 00 01 00 00 00 fe 0c
                     // 0030   8f 01 01 00 00 00 00 00 00 00 00 00
@@ -78,11 +87,10 @@ pub fn main(_: std.process.Init.Minimal) !void {
 
                 },
             }
-
-            listener.returnEvent(event);
         }
 
-        if (Io.Clock.now(.awake, io).toMilliseconds() >= last_time_tick + TICK_DELTA_TIME) {
+        const current_time = Io.Clock.now(.awake, io).toMilliseconds();
+        if (current_time >= last_time_tick + TICK_DELTA_TIME) {
             last_time_tick +%= TICK_DELTA_TIME;
             try listener.tick(@intCast(last_time_tick));
         }

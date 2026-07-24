@@ -48,7 +48,7 @@ tx_buffer_urgent: std.Deque(*raknet.datagram.DatagramMemory),
 tx_datagram_window: DatagramMemoryWindow,
 tx_channels: [CHANNELS_COUNT]Channel,
 
-pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, guid: u64, mtu: u16) !void {
+pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, connection_tick: usize, guid: u64, mtu: u16) !void {
     self.* = .{
         .io = io,
         .guid = guid,
@@ -56,8 +56,8 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
         .endpoint = endpoint,
         .pool_allocator = pool,
         .mtu = mtu,
-        .rx_last_tick = std.math.maxInt(usize) >> 1,
-        .current_tick = 0,
+        .rx_last_tick = connection_tick,
+        .current_tick = connection_tick,
 
         // rx
         .rx_datagram_window = .{},
@@ -139,17 +139,21 @@ pub fn deinit(self: *Connection) void {
 
         queue.deinit(pool.backing_allocator);
     }
+
+    if (self.tx_datagram_writer) |writer| {
+        pool.destroy(writer);
+        self.tx_datagram_writer = null;
+    }
 }
 
 pub fn tick(self: *Connection, tick_id: usize) !void {
     self.current_tick = tick_id;
 
-    try self.updateAcknowledge();
+    try self.txFlushAcknowlege();
 
     if (self.tx_datagram_writer) |writer| {
         if (writer.segments_len > 0)
             if (tick_id > writer.tick + 5) {
-                std.log.info("flush", .{});
                 _ = try txFlushWriter(self);
             };
     }
@@ -385,6 +389,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
             const heap = channel.heap orelse return_heap: {
                 const new_heap = try self.pool_allocator.create(EpochMinHeap);
                 new_heap.* = .{};
+                channel.heap = new_heap;
                 break :return_heap new_heap;
             };
 
@@ -492,7 +497,7 @@ pub fn send(self: *Connection, data: []const u8) !void {
     const space: usize = @intCast(self.mtu - CONSTANTS.UDP_HEADER_SIZE);
     const header: usize = DHS + Segment.headerSize(delivery_policy, false);
 
-    var channel = self.tx_channels[channel_id];
+    var channel = &self.tx_channels[channel_id];
 
     var segment: Segment = .{
         .delivery_policy = delivery_policy,
@@ -598,6 +603,9 @@ fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
         return txw;
     };
 
+    if (tx_writer.segments_len == 0)
+        return tx_writer;
+
     try self.tx_buffer_main.pushBack(self.pool_allocator.backing_allocator, tx_writer);
     tx_writer = try allocDatagramMemory(self);
     self.tx_datagram_writer = tx_writer;
@@ -667,7 +675,7 @@ fn allocDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
     return writer;
 }
 
-pub fn updateAcknowledge(self: *Connection) !void {
+pub fn txFlushAcknowlege(self: *Connection) !void {
     var ack_buffer: [1024]u8 = undefined;
     var nack_buffer: [1024]u8 = undefined;
 

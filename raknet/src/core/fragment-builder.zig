@@ -69,7 +69,7 @@ pub inline fn iterator(self: *@This()) struct {
         return null;
     }
 } {
-    return .{ .cursor = self.first };
+    return .{ .cursor = self.first orelse self.last };
 }
 
 pub inline fn reset(self: *@This()) void {

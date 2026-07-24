@@ -19,6 +19,7 @@ const ListenerEventQueue = std.Deque(ListenerEvent);
 
 guid: u64,
 io: *const std.Io,
+last_tick: usize,
 allocator: std.mem.Allocator,
 sessions: std.AutoHashMap(IpAddress, *ClientSession),
 pool_allocator: FramePool,
@@ -37,7 +38,9 @@ pub fn init(self: *Listener, io: *const std.Io, allocator: std.mem.Allocator) !v
         .motd = "",
         .secret_key = undefined,
         .server_events = undefined,
+        .last_tick = 0,
     };
+
     self.server_events = try .initCapacity(allocator, 128);
     errdefer self.server_events.deinit(allocator);
     try std.Io.randomSecure(io.*, &self.secret_key);
@@ -48,18 +51,31 @@ pub fn optimze(self: *Listener) void {
 }
 
 pub fn deinit(self: *Listener) void {
-    self.server_events.deinit(self.allocator);
-    self.frame_pool.deinit(self.allocator);
+    // server events
+    {
+        var iterator = self.server_events.iterator();
+        while (iterator.next()) |event|
+            returnEvent(self, event);
 
-    var iterator = self.sessions.valueIterator();
-    while (iterator.next()) |value| {
-        value.*.deinit();
-        self.allocator.free(value.*);
+        self.server_events.deinit(self.allocator);
     }
-    self.sessions.deinit();
+
+    // sessions
+    {
+        var iterator = self.sessions.valueIterator();
+        while (iterator.next()) |value| {
+            value.*.deinit();
+            self.allocator.destroy(value.*);
+        }
+        self.sessions.deinit();
+    }
+
+    // should be final
+    self.pool_allocator.deinit();
 }
 
-pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void {
+pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint, current_tick: usize) void {
+    self.last_tick = current_tick; // autofix
     if (buffer.len == 0) return;
 
     const packetId = buffer[0];
@@ -75,17 +91,19 @@ pub inline fn dequeueEvent(self: *Listener) ?ListenerEvent {
 
 pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
     switch (event) {
-        .message => |message| {
+        .messaged => |message| {
             @import("connection.zig").destroySegment(&self.pool_allocator, @ptrCast(@alignCast(@constCast(message.context))));
         },
-        .disconnection => |message| {
-            message.connection.deinit();
+        .disconnected => |message| {
+            _ = self.sessions.remove(message.session.connection.endpoint.address);
+            message.session.deinit();
         },
-        .connection => {},
+        .connected => {},
     }
 }
 
 pub fn tick(self: *Listener, current_tick: usize) !void {
+    self.last_tick = current_tick;
     var iterator = self.sessions.valueIterator();
     while (iterator.next()) |session| {
         try session.*.tick(current_tick);
