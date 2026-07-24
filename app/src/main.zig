@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     const bind_address: net.IpAddress = .{ .ip4 = try .parse("0.0.0.0", 19132) };
     const socket = try bind_address.bind(io, .{ .mode = .dgram });
+    defer socket.close(io);
 
     var listener: Listener = undefined;
     try listener.init(&io, gpa);
@@ -57,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
             .address = result.from,
             .source = &socket,
         };
+
         listener.receive(result.data, &endpoint, @intCast(last_time_tick));
 
         // const result = socket.receiveTimeout(io, &receive_buffer, duration);
@@ -72,8 +74,6 @@ pub fn main(init: std.process.Init) !void {
         //     else => return err,
         // }
         //
-
-        const start_time = Io.Clock.now(.awake, io).toMicroseconds();
 
         while (listener.dequeueEvent()) |event| {
             defer listener.returnEvent(event);
@@ -130,11 +130,9 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        std.log.warn("recieve delta: {}us\n    ", .{Io.Clock.now(.awake, io).toMicroseconds() - start_time});
-
         const current_time = Io.Clock.now(.awake, io).toMilliseconds();
         if (current_time >= last_time_tick + TICK_DELTA_TIME) {
-            last_time_tick +%= TICK_DELTA_TIME;
+            last_time_tick = current_time;
             try listener.tick(@intCast(last_time_tick));
         }
     }

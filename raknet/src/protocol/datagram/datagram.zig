@@ -77,7 +77,7 @@ pub const Segment = struct {
 
         if (is_fragmented) {
             try reader.assert(4 + 2 + 4);
-            self.fragment.? = .{
+            self.fragment = .{
                 .count = reader.readInt(u32, .big),
                 .id = reader.readInt(u16, .big),
                 .index = reader.readInt(u32, .big),

@@ -23,6 +23,8 @@ const CHANNELS_COUNT = 16;
 const PARALLEL_FRAGMENT_BUILDERS = 32;
 const RECEIVE_BUFFER = 128;
 const DATAGRAM_ACKNOWLEDGE_TIMEOUT_TICKS = 3000;
+const UPDATE_ACKNOWLEDGE_DELAY_TICKS = 30;
+const FLUSH_WRITER_DELAY_TICKS = 5;
 
 const Connection = @This();
 
@@ -49,8 +51,6 @@ tx_buffer_main: std.Deque(*raknet.datagram.DatagramMemory),
 tx_buffer_urgent: std.Deque(*raknet.datagram.DatagramMemory),
 tx_datagram_window: DatagramMemoryWindow,
 tx_channels: [CHANNELS_COUNT]Channel,
-
-var latest_datagram_id: usize = 0;
 
 pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, connection_tick: usize, guid: u64, mtu: u16) !void {
     self.* = .{
@@ -154,19 +154,18 @@ pub fn deinit(self: *Connection) void {
 pub fn tick(self: *Connection, tick_id: usize) !void {
     self.current_tick = tick_id;
 
-    if (tick_id > self.tx_last_ack_tick + 40) {
+    if (tick_id > self.tx_last_ack_tick + UPDATE_ACKNOWLEDGE_DELAY_TICKS) {
         self.tx_last_ack_tick = tick_id;
         try self.txFlushAcknowlege();
     }
 
     if (self.tx_datagram_writer) |writer| {
-        if (writer.segments_len > 0)
-            if (tick_id > writer.tick + 5) {
-                _ = try txFlushWriter(self);
-            };
+        if (writer.segments_len > 0 and tick_id > writer.tick + FLUSH_WRITER_DELAY_TICKS) {
+            _ = try txFlushWriter(self);
+        }
     }
 
-    _ = try txFlush(self);
+    _ = try txFlushWindow(self);
 }
 
 pub fn receive(self: *Connection, datagram: []const u8) !void {
@@ -236,9 +235,6 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     try reader.assert(3);
     const datagram_index: u32 = binary.readU24LE(&reader);
 
-    if (latest_datagram_id <= datagram_index) {
-        latest_datagram_id = datagram_index;
-    }
     const last_datagram_index = Utils.fixed(self.rx_datagram_window.head -% 1);
     const distance = Utils.distance(last_datagram_index, datagram_index);
 
@@ -451,7 +447,6 @@ fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: 
     if (fragment.count == builder.count) {
         var iterator = builder.iterator();
         var buffer = try self.pool_allocator.backing_allocator.alloc(u8, builder.buffer_size);
-        logger.debug("Fragment Rebuilded: {}", .{builder.buffer_size});
 
         var offset: usize = 0;
         while (iterator.next()) |seg| {
@@ -561,6 +556,8 @@ pub fn send(self: *Connection, data: []const u8) !void {
         .index = 0,
     };
 
+    self.tx_fragment_index +%= 1;
+
     for (0..fragment_count) |index| {
         if (delivery_policy.isReliable()) {
             segment.reliable_index = self.tx_reliable_index;
@@ -623,9 +620,7 @@ fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
     return tx_writer;
 }
 
-/// Returns true if state changed
-pub fn txFlush(self: *Connection) !bool {
-    _ = try txFlushWriter(self);
+fn txFlushWindow(self: *Connection) !bool {
     var flushed = false;
     while (self.tx_datagram_window.available() != 0) {
         var reliable_only = false;
@@ -652,6 +647,12 @@ pub fn txFlush(self: *Connection) !bool {
     }
 
     return flushed;
+}
+
+/// Returns true if state changed
+pub fn txFlush(self: *Connection) !bool {
+    _ = try txFlushWriter(self);
+    _ = try txFlushWindow(self);
 }
 
 fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory, datagram_index: u32, reliable_only: bool) !bool {
@@ -709,10 +710,6 @@ pub fn txFlushAcknowlege(self: *Connection) !void {
             .min = range.tail,
             .max = range.head -% 1,
         });
-        logger.warn("last_datagram_recieved: {}, range: {any}", .{ latest_datagram_id, .{
-            .min = range.tail,
-            .max = range.head -% 1,
-        } });
     }
 
     const ack = ack_writer.getProcessedBytes();
