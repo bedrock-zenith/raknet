@@ -77,7 +77,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
 
                     // Reply with own network setting packet to the network settings request packet
                     // contains gameheader, size of payload, packet id in varint format and packet data
-                    try message.session.connection.send(&.{ 0xfe, 0x0c, 0x8f, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+                    try message.session.connection.send(&.{ 0xfe, 0x0c, 0x8f, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
 
                     // 0020   84 03 00 00 60 00 70 01 00 00 01 00 00 00 fe 0c
                     // 0030   8f 01 01 00 00 00 00 00 00 00 00 00
