@@ -10,6 +10,7 @@ const binary = common.binary;
 const CONSTANTS = @import("../constants.zig");
 const raknet = @import("../protocol/root.zig");
 const Segment = raknet.datagram.Segment;
+const logger = @import("../root.zig").raknet_logger;
 const ConnectionState = @import("connection-state.zig").ConnectionState;
 const Endpoint = @import("endpoint.zig");
 const FragmentBuilder = @import("fragment-builder.zig");
@@ -30,6 +31,7 @@ mtu: u16,
 guid: u64,
 current_tick: usize,
 rx_last_tick: usize,
+tx_last_ack_tick: usize,
 state: ConnectionState,
 endpoint: Endpoint,
 pool_allocator: *PoolAllocator,
@@ -48,6 +50,8 @@ tx_buffer_urgent: std.Deque(*raknet.datagram.DatagramMemory),
 tx_datagram_window: DatagramMemoryWindow,
 tx_channels: [CHANNELS_COUNT]Channel,
 
+var latest_datagram_id: usize = 0;
+
 pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, connection_tick: usize, guid: u64, mtu: u16) !void {
     self.* = .{
         .io = io,
@@ -58,6 +62,7 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
         .mtu = mtu,
         .rx_last_tick = connection_tick,
         .current_tick = connection_tick,
+        .tx_last_ack_tick = connection_tick,
 
         // rx
         .rx_datagram_window = .{},
@@ -149,7 +154,10 @@ pub fn deinit(self: *Connection) void {
 pub fn tick(self: *Connection, tick_id: usize) !void {
     self.current_tick = tick_id;
 
-    try self.txFlushAcknowlege();
+    if (tick_id > self.tx_last_ack_tick + 40) {
+        self.tx_last_ack_tick = tick_id;
+        try self.txFlushAcknowlege();
+    }
 
     if (self.tx_datagram_writer) |writer| {
         if (writer.segments_len > 0)
@@ -228,6 +236,9 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     try reader.assert(3);
     const datagram_index: u32 = binary.readU24LE(&reader);
 
+    if (latest_datagram_id <= datagram_index) {
+        latest_datagram_id = datagram_index;
+    }
     const last_datagram_index = Utils.fixed(self.rx_datagram_window.head -% 1);
     const distance = Utils.distance(last_datagram_index, datagram_index);
 
@@ -236,7 +247,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     //
     // ref: BitWindow.reserve first assert
     if (distance > @as(i32, @bitCast(self.rx_datagram_window.available()))) {
-        std.log.err("Capacity fail: ", .{});
+        logger.err("Capacity fail: ", .{});
         return error.Unrecoverable;
     }
 
@@ -244,7 +255,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     //
     // ref: BitWindow.@etValue first assert sequenceIndex >= tail
     if (distance < -@as(i32, @bitCast(self.rx_datagram_window.len))) {
-        std.log.err("BitRingBuffer.@etValue first assert sequenceIndex >= tail, d: {}, {}, {}", .{
+        logger.err("BitRingBuffer.@etValue first assert sequenceIndex >= tail, d: {}, {}, {}", .{
             distance,
             self.rx_datagram_window,
             -@as(i32, @bitCast(self.rx_datagram_window.len)),
@@ -336,8 +347,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
 
     var segment: *Segment = undefined;
     if (input.fragment) |fragment| {
-        segment = try rxFragment(self, fragment, input) orelse
-            try allocSegment(self, input);
+        segment = try rxFragment(self, fragment, input) orelse return;
     } else segment = try allocSegment(self, input);
 
     ////////// EPOCH & SNAPSHOT SHI //////////
@@ -441,6 +451,7 @@ fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: 
     if (fragment.count == builder.count) {
         var iterator = builder.iterator();
         var buffer = try self.pool_allocator.backing_allocator.alloc(u8, builder.buffer_size);
+        logger.debug("Fragment Rebuilded: {}", .{builder.buffer_size});
 
         var offset: usize = 0;
         while (iterator.next()) |seg| {
@@ -698,6 +709,10 @@ pub fn txFlushAcknowlege(self: *Connection) !void {
             .min = range.tail,
             .max = range.head -% 1,
         });
+        logger.warn("last_datagram_recieved: {}, range: {any}", .{ latest_datagram_id, .{
+            .min = range.tail,
+            .max = range.head -% 1,
+        } });
     }
 
     const ack = ack_writer.getProcessedBytes();

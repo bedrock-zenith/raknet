@@ -9,6 +9,7 @@ const raknet = @import("../protocol/root.zig");
 const IpAddress = raknet.RakAddress.Type;
 const PacketId = raknet.PacketId;
 const offline_packet = @import("../protocol/root.zig").offline;
+const logger = @import("../root.zig").raknet_logger;
 pub const ClientSession = @import("client-session.zig");
 const Endpoint = @import("endpoint.zig");
 const FramePool = @import("root.zig").FramePool;
@@ -128,10 +129,10 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) void 
                     self.sessions.removeByPtr(entry.key_ptr);
             }
         },
-        _ => std.log.err("Unknown packet, size: {d}, packet_id: {d}", .{ buffer.len, buffer[0] }),
-        else => std.log.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), buffer.len, buffer[0] }),
+        _ => logger.err("Unknown packet, size: {d}, packet_id: {d}", .{ buffer.len, buffer[0] }),
+        else => logger.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), buffer.len, buffer[0] }),
     }) catch
-        std.debug.print("debug: Failed process {s}", .{@tagName(packet_id)});
+        logger.debug("debug: Failed process {s}", .{@tagName(packet_id)});
 }
 
 fn rxUnconnectedPing(self: *const Listener, buffer: []const u8, endpoint: *const Endpoint) !void {

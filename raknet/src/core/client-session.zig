@@ -4,6 +4,7 @@ const Reader = @import("../common/root.zig").Reader;
 const Writer = @import("../common/root.zig").Writer;
 const binary = @import("../common/root.zig").binary;
 const raknet = @import("../protocol/root.zig");
+const logger = @import("../root.zig").raknet_logger;
 const Connection = @import("connection.zig");
 const destroySegment = @import("connection.zig").destroySegment;
 const Endpoint = @import("endpoint.zig");
@@ -50,7 +51,7 @@ pub fn receive(self: *ClientSession, datagram: []const u8) !void {
 
 pub fn tick(self: *ClientSession, current_tick: usize) !void {
     if (current_tick > self.connection.rx_last_tick + STALE_SESSION_TIMEOUT_TICKS) {
-        std.log.debug("stale session", .{});
+        logger.debug("stale session", .{});
         try disconnect(self);
         return;
     }
@@ -65,7 +66,7 @@ fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) !void {
     }
 
     const packet_id: raknet.PacketId = @enumFromInt(segment.body[0]);
-    std.log.info("packet_id: {}", .{packet_id});
+    logger.info("packet_id: {}", .{packet_id});
 
     switch (packet_id) {
         .ConnectionRequest => try rxConnectionRequest(self, segment),
