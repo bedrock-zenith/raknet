@@ -49,7 +49,7 @@ pub const Segment = struct {
     // We can use it as linked list when building fragments together
     meta: MetaInfo = .{},
 
-    pub fn read(self: *Segment, reader: *Reader) !void {
+    pub fn read(self: *Segment, reader: *Reader) Reader.Error!void {
         try reader.assert(3);
         const flags = reader.readByte();
         const delivery_policy: DeliveryPolicy = @enumFromInt((flags >> 5) & 0x7);
@@ -88,7 +88,7 @@ pub const Segment = struct {
         self.body = reader.readSlice(data_len);
     }
 
-    pub fn write(self: *const Segment, writer: *Writer) !void {
+    pub fn write(self: *const Segment, writer: *Writer) Writer.Error!void {
         var flags: u8 = 0;
         flags |= @intFromEnum(self.delivery_policy) << 5;
         if (self.fragment != null) flags |= FRAGMENTED_BIT;

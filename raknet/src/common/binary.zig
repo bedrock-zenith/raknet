@@ -241,14 +241,12 @@ pub inline fn writeU24LE(writer: *common.Writer, value: u32) void {
 }
 
 pub inline fn writeRange(cursor: *common.Writer, value: raknet.AckRange) !void {
-    try cursor.assert(4);
+    try cursor.assert(if (value.min == value.max) 4 else 7);
     cursor.writeByte(if (value.min == value.max) 1 else 0);
     writeU24LE(cursor, value.min);
 
-    if (value.min != value.max) {
-        try cursor.assert(3);
+    if (value.min != value.max)
         writeU24LE(cursor, value.max);
-    }
 }
 
 pub inline fn readRange(cursor: *common.Reader) !raknet.AckRange {

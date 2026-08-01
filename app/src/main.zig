@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     defer socket.close(io);
 
     var listener: Listener = undefined;
-    try listener.init(&io, gpa);
+    try listener.init(io, gpa);
     defer listener.deinit();
 
     const motd = try std.fmt.allocPrint(gpa, "MCPE;Dedicated Server;527;1.19.1;0;10;{d};Bedrock level;Survival;1;", .{listener.guid});
@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
             .source = &socket,
         };
 
-        listener.receive(result.data, &endpoint, @intCast(last_time_tick));
+        try listener.receive(result.data, &endpoint, @intCast(last_time_tick));
 
         // const result = socket.receiveTimeout(io, &receive_buffer, duration);
 
@@ -134,6 +134,8 @@ pub fn main(init: std.process.Init) !void {
         if (current_time >= last_time_tick + TICK_DELTA_TIME) {
             last_time_tick = current_time;
             try listener.tick(@intCast(last_time_tick));
+
+            try listener.txFlush();
         }
     }
 }

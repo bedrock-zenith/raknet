@@ -1,12 +1,13 @@
 pub const Writer = CursorKind(false);
 pub const Reader = CursorKind(true);
 
-const CursorError = error{
+pub const CursorError = error{
     IndexOutOfBounds,
 };
 
 fn CursorKind(comptime isReadOnly: bool) type {
     return struct {
+        pub const Error = CursorError;
         const BufferType = if (isReadOnly) ([]const u8) else []u8;
         const Instance = @This();
         const std = @import("std");
@@ -41,7 +42,7 @@ fn CursorKind(comptime isReadOnly: bool) type {
             return cursor.buffer.len - cursor.pointer;
         }
 
-        pub inline fn assert(cursor: *const Instance, bytes: usize) CursorError!void {
+        pub inline fn assert(cursor: *const Instance, bytes: usize) Error!void {
             if (cursor.remaining() < bytes)
                 return error.IndexOutOfBounds;
         }

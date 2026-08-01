@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const Utils = @import("../24/root.zig").Utils;
 const BitWindow = @import("../24/root.zig").BitWindow;
@@ -27,8 +28,7 @@ const UPDATE_ACKNOWLEDGE_DELAY_TICKS = 30;
 const FLUSH_WRITER_DELAY_TICKS = 5;
 
 const Connection = @This();
-
-io: *const std.Io,
+io: std.Io,
 mtu: u16,
 guid: u64,
 current_tick: usize,
@@ -37,6 +37,7 @@ tx_last_ack_tick: usize,
 state: ConnectionState,
 endpoint: Endpoint,
 pool_allocator: *PoolAllocator,
+gpa: Allocator,
 
 rx_datagram_window: DatagramWindow,
 rx_reliable_window: ReliableWindow,
@@ -51,14 +52,25 @@ tx_buffer_main: std.Deque(*raknet.datagram.DatagramMemory),
 tx_buffer_urgent: std.Deque(*raknet.datagram.DatagramMemory),
 tx_datagram_window: DatagramMemoryWindow,
 tx_channels: [CHANNELS_COUNT]Channel,
+tx_send: std.Deque([]u8),
 
-pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint: Endpoint, connection_tick: usize, guid: u64, mtu: u16) !void {
+pub fn init(
+    self: *Connection,
+    io: std.Io,
+    pool: *PoolAllocator,
+    gpa: Allocator,
+    endpoint: Endpoint,
+    connection_tick: usize,
+    guid: u64,
+    mtu: u16,
+) Allocator.Error!void {
     self.* = .{
         .io = io,
         .guid = guid,
         .state = .Unconnected,
         .endpoint = endpoint,
         .pool_allocator = pool,
+        .gpa = gpa,
         .mtu = mtu,
         .rx_last_tick = connection_tick,
         .current_tick = connection_tick,
@@ -83,28 +95,32 @@ pub fn init(self: *Connection, io: *const std.Io, pool: *PoolAllocator, endpoint
         .rx_received = undefined,
         .tx_buffer_main = undefined,
         .tx_buffer_urgent = undefined,
+        .tx_send = undefined,
     };
-    self.rx_received = try .initCapacity(pool.backing_allocator, 512);
-    errdefer self.rx_received.deinit(pool.backing_allocator);
+    self.rx_received = try .initCapacity(self.gpa, 512);
+    errdefer self.rx_received.deinit(self.gpa);
 
-    self.tx_buffer_main = try .initCapacity(pool.backing_allocator, 512);
-    errdefer self.tx_buffer_main.deinit(pool.backing_allocator);
+    self.tx_buffer_main = try .initCapacity(self.gpa, 512);
+    errdefer self.tx_buffer_main.deinit(self.gpa);
 
-    self.tx_buffer_urgent = try .initCapacity(pool.backing_allocator, 512);
-    errdefer self.tx_buffer_urgent.deinit(pool.backing_allocator);
+    self.tx_buffer_urgent = try .initCapacity(self.gpa, 512);
+    errdefer self.tx_buffer_urgent.deinit(self.gpa);
+
+    self.tx_send = try .initCapacity(self.gpa, 16);
+    errdefer self.tx_send.deinit(self.gpa);
 }
 
 /// This function might and might not free segment data or segment it self
 pub fn deinit(self: *Connection) void {
     const pool = self.pool_allocator;
-    const backing_allocator = &pool.backing_allocator;
+    const gpa = self.gpa;
 
     var rx_received_iterator = self.rx_received.iterator();
     while (rx_received_iterator.next()) |segment| {
-        destroySegment(pool, segment);
+        destroySegment(pool, gpa, segment);
     }
 
-    self.rx_received.deinit(self.pool_allocator.backing_allocator);
+    self.rx_received.deinit(self.gpa);
 
     // Do not deallocate anything that wasn't allocated in BaseConnection
     // Clean up any unprocessed fragments
@@ -112,17 +128,17 @@ pub fn deinit(self: *Connection) void {
         if (v.last == null) continue;
         var iterator = v.iterator();
         while (iterator.next()) |segment|
-            destroySegment(pool, segment);
+            destroySegment(pool, gpa, segment);
     }
 
     for (&self.rx_channels) |*channel| {
         if (channel.heap) |heap| {
             for (0..heap.len) |i| {
                 const segment = heap.buffer[i];
-                destroySegment(pool, segment.segment);
+                destroySegment(pool, gpa, segment.segment);
             }
 
-            backing_allocator.destroy(heap);
+            gpa.destroy(heap);
         }
     }
 
@@ -142,16 +158,25 @@ pub fn deinit(self: *Connection) void {
         while (iterator.next()) |window|
             pool.destroy(window);
 
-        queue.deinit(pool.backing_allocator);
+        queue.deinit(gpa);
     }
 
     if (self.tx_datagram_writer) |writer| {
         pool.destroy(writer);
         self.tx_datagram_writer = null;
     }
+
+    while (self.tx_send.popFront()) |buffer|
+        pool.destroy(buffer.ptr);
+
+    self.tx_send.deinit(gpa);
 }
 
-pub fn tick(self: *Connection, tick_id: usize) !void {
+pub const RxFragmentBuilderOutOfMemoryError = error{FragmentBuilderOutOfMemory};
+pub const RxInvalidPacketError = error{InvalidPacket};
+pub const RxError = error{ Unrecoverable, ChannelOutOfBounds } || RxInvalidPacketError || RxFragmentBuilderOutOfMemoryError;
+
+pub fn tick(self: *Connection, tick_id: usize) Allocator.Error!void {
     self.current_tick = tick_id;
 
     if (tick_id > self.tx_last_ack_tick + UPDATE_ACKNOWLEDGE_DELAY_TICKS) {
@@ -168,7 +193,7 @@ pub fn tick(self: *Connection, tick_id: usize) !void {
     _ = try txFlushWindow(self);
 }
 
-pub fn receive(self: *Connection, datagram: []const u8) !void {
+pub fn receive(self: *Connection, datagram: []const u8) (RxError || Allocator.Error)!void {
     self.rx_last_tick = self.current_tick;
     if (self.state == .Disconnected) {
         @branchHint(.cold);
@@ -181,18 +206,19 @@ pub fn receive(self: *Connection, datagram: []const u8) !void {
     try rxDatagram(self, datagram);
 }
 
-fn rxAcknowledge(self: *Connection, datagram: []const u8) !void {
+fn rxAcknowledge(self: *Connection, datagram: []const u8) (RxInvalidPacketError || Allocator.Error)!void {
     var reader: Reader = .init(datagram, 1);
-    try reader.assert(3);
+    reader.assert(3) catch return error.InvalidPacket;
     const is_nack = datagram[0] & raknet.datagram.NOT_ACKNOWLEDGE_BIT_MASK != 0;
 
     const count: u16 = reader.readInt(u16, .big);
 
     for (0..count) |_| {
-        const range = try binary.readRange(&reader);
+        const range = binary.readRange(&reader) catch return error.InvalidPacket;
         var offset = range.min;
         const distance = Utils.distance(range.min, range.max);
         if (distance < 0) continue;
+        if (distance > 1024) return error.InvalidPacket;
 
         for (0..@intCast(distance + 1)) |_| {
             const index = offset;
@@ -205,7 +231,7 @@ fn rxAcknowledge(self: *Connection, datagram: []const u8) !void {
                 self.tx_datagram_window.buffer[ptr] = null;
 
                 if (is_nack) {
-                    try self.tx_buffer_urgent.pushBack(self.pool_allocator.backing_allocator, datagram_element);
+                    try self.tx_buffer_urgent.pushBack(self.gpa, datagram_element);
                 } else {
                     self.pool_allocator.destroy(datagram_element);
                 }
@@ -216,7 +242,7 @@ fn rxAcknowledge(self: *Connection, datagram: []const u8) !void {
     try txCleanDatagramWindow(self);
 }
 
-fn txCleanDatagramWindow(self: *Connection) !void {
+fn txCleanDatagramWindow(self: *Connection) Allocator.Error!void {
     while (self.tx_datagram_window.len > 0) {
         const datagram = self.tx_datagram_window.peek() orelse {
             _ = self.tx_datagram_window.pop();
@@ -226,13 +252,13 @@ fn txCleanDatagramWindow(self: *Connection) !void {
         if (self.current_tick < datagram.tick + DATAGRAM_ACKNOWLEDGE_TIMEOUT_TICKS) break;
 
         _ = self.tx_datagram_window.pop();
-        try self.tx_buffer_urgent.pushBack(self.pool_allocator.backing_allocator, datagram);
+        try self.tx_buffer_urgent.pushBack(self.gpa, datagram);
     }
 }
 
-fn rxDatagram(self: *Connection, datagram: []const u8) !void {
+fn rxDatagram(self: *Connection, datagram: []const u8) (RxError || Allocator.Error)!void {
     var reader: Reader = .init(datagram, 1);
-    try reader.assert(3);
+    reader.assert(3) catch return error.InvalidPacket;
     const datagram_index: u32 = binary.readU24LE(&reader);
 
     const last_datagram_index = Utils.fixed(self.rx_datagram_window.head -% 1);
@@ -281,7 +307,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     // gets optimized away
     var segment: Segment = undefined;
     while (reader.remaining() > 0) {
-        segment.read(&reader) catch continue;
+        segment.read(&reader) catch return error.InvalidPacket;
         segment.meta.alloc = .{ .data = .borrowed, .self = .borrowed };
         rxSegment(self, &segment) catch |err| switch (err) {
             error.ChannelOutOfBounds => continue,
@@ -290,7 +316,7 @@ fn rxDatagram(self: *Connection, datagram: []const u8) !void {
     }
 }
 
-fn rxSegment(self: *Connection, input: *const Segment) !void {
+fn rxSegment(self: *Connection, input: *const Segment) (RxError || Allocator.Error)!void {
 
     // f*ck it, just ignore this sus connection behavior
     if (input.delivery_policy.hasEpochOrSnapshot() and input.channel.id > CHANNELS_COUNT)
@@ -302,10 +328,10 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
         const hole = Utils.distance(self.rx_reliable_window.head, input.reliable_index);
 
         // We are missing too many packets to recover the connection
-        // or we got old packet thats too old
         if (hole > @as(i32, @bitCast(self.rx_reliable_window.available())))
             return error.Unrecoverable;
 
+        // or we got old packet thats too old, we don't really care about that one
         if (hole < -%@as(i32, @bitCast(self.rx_reliable_window.len)))
             return;
 
@@ -355,7 +381,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
             // old epoch new snapshot
             if (segment.delivery_policy.hasSnapshot()) {
                 if (Utils.distance(channel.snapshot_index, segment.channel.snapshot_index) < 0) {
-                    destroySegment(self.pool_allocator, segment);
+                    destroySegment(self.pool_allocator, self.gpa, segment);
                     // Old snapshots are ignored
                     return;
                 }
@@ -412,7 +438,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
         // should be already discarded by reliability
         // but its good to cover the worse scenarios
         else {
-            destroySegment(self.pool_allocator, segment);
+            destroySegment(self.pool_allocator, self.gpa, segment);
             return;
         }
     }
@@ -422,7 +448,7 @@ fn rxSegment(self: *Connection, input: *const Segment) !void {
     try rxFinalize(self, segment);
 }
 
-fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: *const Segment) !?*Segment {
+fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: *const Segment) (RxFragmentBuilderOutOfMemoryError || Allocator.Error)!?*Segment {
     const builder_index = fragment.id % PARALLEL_FRAGMENT_BUILDERS;
 
     const builder = &self.rx_fragment_builder[builder_index];
@@ -446,7 +472,7 @@ fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: 
 
     if (fragment.count == builder.count) {
         var iterator = builder.iterator();
-        var buffer = try self.pool_allocator.backing_allocator.alloc(u8, builder.buffer_size);
+        var buffer = try self.gpa.alloc(u8, builder.buffer_size);
 
         var offset: usize = 0;
         while (iterator.next()) |seg| {
@@ -465,15 +491,15 @@ fn rxFragment(self: *Connection, fragment: Segment.FragmentInfo, input_segment: 
     return null;
 }
 
-fn rxFinalize(self: *Connection, segment: *Segment) !void {
+fn rxFinalize(self: *Connection, segment: *Segment) Allocator.Error!void {
     std.debug.assert(segment.meta.alloc.self == .allocated);
-    try self.rx_received.pushBack(self.pool_allocator.backing_allocator, segment);
+    try self.rx_received.pushBack(self.gpa, segment);
 }
 
 /// This function might and might not free segment data or segment it self
-pub fn destroySegment(pool_allocator: *PoolAllocator, segment: *Segment) void {
+pub fn destroySegment(pool_allocator: *PoolAllocator, gpa_allocator: std.mem.Allocator, segment: *Segment) void {
     switch (segment.meta.alloc.data) {
-        .allocated => pool_allocator.backing_allocator.free(segment.body),
+        .allocated => gpa_allocator.free(segment.body),
         .borrowed, .contained => {},
     }
 
@@ -483,7 +509,7 @@ pub fn destroySegment(pool_allocator: *PoolAllocator, segment: *Segment) void {
     }
 }
 
-fn allocSegment(self: *const Connection, segment: *const Segment) !*Segment {
+fn allocSegment(self: *const Connection, segment: *const Segment) Allocator.Error!*Segment {
     var allocated_segment = try self.pool_allocator.create(Segment);
     allocated_segment.* = segment.*;
 
@@ -494,7 +520,8 @@ fn allocSegment(self: *const Connection, segment: *const Segment) !*Segment {
     return allocated_segment;
 }
 
-pub fn send(self: *Connection, data: []const u8) !void {
+/// This method does not borrow the data buffer, after this method is called you are free to use data again
+pub fn send(self: *Connection, data: []const u8) Allocator.Error!void {
     // Parameters candidates shi
     const channel_id = 0;
     const delivery_policy: raknet.DeliveryPolicy = .ReliableOrdered;
@@ -574,7 +601,7 @@ pub fn send(self: *Connection, data: []const u8) !void {
     }
 }
 
-fn txQueue(self: *Connection, segment: *const Segment) !void {
+fn txQueue(self: *Connection, segment: *const Segment) Allocator.Error!void {
     var tx_writer = self.tx_datagram_writer orelse alloc: {
         const new = try allocDatagramMemory(self);
         self.tx_datagram_writer = new;
@@ -604,7 +631,7 @@ fn txQueue(self: *Connection, segment: *const Segment) !void {
         _ = try txFlushWriter(self);
 }
 
-fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
+fn txFlushWriter(self: *Connection) Allocator.Error!*raknet.datagram.DatagramMemory {
     var tx_writer = self.tx_datagram_writer orelse {
         const txw = try allocDatagramMemory(self);
         self.tx_datagram_writer = txw;
@@ -614,13 +641,13 @@ fn txFlushWriter(self: *Connection) !*raknet.datagram.DatagramMemory {
     if (tx_writer.segments_len == 0)
         return tx_writer;
 
-    try self.tx_buffer_main.pushBack(self.pool_allocator.backing_allocator, tx_writer);
+    try self.tx_buffer_main.pushBack(self.gpa, tx_writer);
     tx_writer = try allocDatagramMemory(self);
     self.tx_datagram_writer = tx_writer;
     return tx_writer;
 }
 
-fn txFlushWindow(self: *Connection) !bool {
+fn txFlushWindow(self: *Connection) Allocator.Error!bool {
     var flushed = false;
     while (self.tx_datagram_window.available() != 0) {
         var reliable_only = false;
@@ -650,14 +677,14 @@ fn txFlushWindow(self: *Connection) !bool {
 }
 
 /// Returns true if state changed
-pub fn txFlush(self: *Connection) !bool {
+pub fn txFlush(self: *Connection) Allocator.Error!bool {
     _ = try txFlushWriter(self);
     _ = try txFlushWindow(self);
 }
 
-fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory, datagram_index: u32, reliable_only: bool) !bool {
-    var buffer: [2048]u8 = undefined;
-    var writer: Writer = .init(&buffer, 0);
+fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory, datagram_index: u32, reliable_only: bool) Allocator.Error!bool {
+    const buffer: *[2048]u8 = try self.pool_allocator.rent();
+    var writer: Writer = .init(buffer, 0);
 
     writer.writeByte(raknet.datagram.DATAGRAM_BIT_MASK | 4);
     binary.writeU24LE(&writer, datagram_index);
@@ -668,18 +695,20 @@ fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory,
         if (reliable_only and !segment.delivery_policy.isReliable())
             continue;
 
-        try segment.write(&writer);
+        // We assert the this method is called after framing is done anyway
+        segment.write(&writer) catch unreachable;
     }
 
     // no data to send
     if (writer.pointer == raknet.datagram.DATAGRAM_HEADER_SIZE) return false;
 
-    try self.endpoint.send(self.io.*, writer.getProcessedBytes());
+    try self.tx_send.pushBack(self.gpa, writer.getProcessedBytes());
+    // try self.endpoint.send(self.io.*, writer.getProcessedBytes());
 
     return true;
 }
 
-fn allocDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
+fn allocDatagramMemory(self: *Connection) Allocator.Error!*raknet.datagram.DatagramMemory {
     var writer = try self.pool_allocator.create(raknet.datagram.DatagramMemory);
     writer.clear();
     writer.tick = self.current_tick;
@@ -687,41 +716,127 @@ fn allocDatagramMemory(self: *Connection) !*raknet.datagram.DatagramMemory {
     return writer;
 }
 
-pub fn txFlushAcknowlege(self: *Connection) !void {
-    var ack_buffer: [1024]u8 = undefined;
-    var nack_buffer: [1024]u8 = undefined;
+pub fn txFlushAcknowlege(self: *Connection) Allocator.Error!void {
+    const AckMeta = struct {
+        ack: bool,
+        buffer: []u8 = undefined,
+        writer: Writer = undefined,
+        count: usize = 0,
+        pub inline fn reinitialize(this: *@This(), pool: *PoolAllocator) !void {
+            this.buffer = try pool.rent();
+            this.writer = .init(this.buffer, 3);
+            this.count = 0;
+        }
+        pub inline fn finalize(this: *@This()) []u8 {
+            const buf = this.writer.getProcessedBytes();
+            this.writer.pointer = 0;
+            this.writer.writeByte(if (this.ack) raknet.datagram.ACKNOWLEDGE_PACKED_ID else raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
+            this.writer.writeInt(u16, @intCast(this.count), .big);
+            return buf;
+        }
+    };
 
-    var ack_writer: Writer = .init(&ack_buffer, 0);
-    var ack_count: usize = 0;
-    ack_writer.writeByte(raknet.datagram.ACKNOWLEDGE_PACKED_ID);
-    ack_writer.skip(2);
-
-    var nack_writer: Writer = .init(&nack_buffer, 0);
-    var nack_count: usize = 0;
-    nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
-    nack_writer.skip(2);
-
-    var iterator = self.rx_datagram_window.iterator();
-    while (iterator.next()) |range| {
-        const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
-        const counter: *usize = if (range.bit) &ack_count else &nack_count;
-        counter.* = counter.* + 1;
-        try binary.writeRange(writer, .{
-            .min = range.tail,
-            .max = range.head -% 1,
-        });
+    var ack: AckMeta = .{ .ack = true, .buffer = &.{} };
+    try ack.reinitialize(self.pool_allocator);
+    errdefer {
+        if (ack.buffer.len > 0) self.pool_allocator.destroy(ack.buffer.ptr);
     }
 
-    const ack = ack_writer.getProcessedBytes();
-    const nack = nack_writer.getProcessedBytes();
-    ack_writer.pointer = 1;
-    ack_writer.writeInt(u16, @intCast(ack_count), .big);
-    nack_writer.pointer = 1;
-    nack_writer.writeInt(u16, @intCast(nack_count), .big);
-    if (ack.len > 3)
-        try self.endpoint.send(self.io.*, ack);
-    if (nack.len > 3)
-        try self.endpoint.send(self.io.*, nack);
+    var nack: AckMeta = .{ .ack = false };
+    try nack.reinitialize(self.pool_allocator);
+    errdefer {
+        if (nack.buffer.len > 0) self.pool_allocator.destroy(nack.buffer.ptr);
+    }
+
+    var iterator = self.rx_datagram_window.iterator();
+    var next = iterator.next();
+
+    state: switch (enum { Next, Finalize, Flush }.Next) {
+        .Next => if (next) |range| {
+            const meta: *AckMeta = if (range.bit) &ack else &nack;
+            meta.count +%= 1;
+
+            // try to write and flush if it doesn't fit the buffers
+            binary.writeRange(&meta.writer, .{
+                .min = range.tail,
+                .max = range.head -% 1,
+            }) catch continue :state .Flush;
+
+            next = iterator.next();
+            continue :state .Next;
+        } else continue :state .Finalize,
+        .Flush => {
+            const meta: *AckMeta = if (ack.writer.remaining() <= 7) &ack else &nack;
+            const buff = meta.finalize();
+            try self.tx_send.pushBack(self.gpa, buff);
+            try meta.reinitialize(self.pool_allocator);
+            continue :state .Next;
+        },
+        .Finalize => {
+            inline for (.{ &ack, &nack }) |meta| {
+                const buff = meta.finalize();
+                if (buff.len > 3) {
+                    try self.tx_send.pushBack(self.gpa, buff);
+                    meta.buffer = &.{};
+                } else {
+                    self.pool_allocator.destroy(meta.buffer.ptr);
+                    meta.buffer = &.{};
+                }
+            }
+        },
+    }
+
+    // var iterator = self.rx_datagram_window.iterator();
+    // var next = iterator.next();
+    // while (next) {
+    //     const ack_buffer: *[1024]u8 = try self.pool_allocator.rent();
+    //     errdefer self.pool_allocator.destroy(ack_buffer);
+    //     const nack_buffer: *[1024]u8 = try self.pool_allocator.rent();
+    //     errdefer self.pool_allocator.deinit(nack_buffer);
+
+    //     var ack_writer: Writer = .init(ack_buffer, 0);
+    //     var ack_count: usize = 0;
+    //     ack_writer.writeByte(raknet.datagram.ACKNOWLEDGE_PACKED_ID);
+    //     ack_writer.skip(2);
+
+    //     var nack_writer: Writer = .init(nack_buffer, 0);
+    //     var nack_count: usize = 0;
+    //     nack_writer.writeByte(raknet.datagram.NOT_ACKNOWLEDGE_PACKED_ID);
+    //     nack_writer.skip(2);
+
+    //     while (next) |range| {
+    //         const writer: *Writer = if (range.bit) &ack_writer else &nack_writer;
+    //         const counter: *usize = if (range.bit) &ack_count else &nack_count;
+    //         counter.* = counter.* + 1;
+
+    //         // try to write and break if it doesn't fit the buffers
+    //         binary.writeRange(writer, .{
+    //             .min = range.tail,
+    //             .max = range.head -% 1,
+    //         }) catch break;
+
+    //         next = iterator.next();
+    //     }
+
+    //     const ack: []u8 = ack_writer.getProcessedBytes();
+    //     const nack: []u8 = nack_writer.getProcessedBytes();
+    //     ack_writer.pointer = 1;
+    //     ack_writer.writeInt(u16, @intCast(ack_count), .big);
+    //     nack_writer.pointer = 1;
+    //     nack_writer.writeInt(u16, @intCast(nack_count), .big);
+
+    //     if (ack.len > 3) {
+    //         self.tx_send.pushBack(self.gpa_allocator, ack) catch self.pool_allocator.destroy(ack.ptr);
+    //     } else {
+    //         self.pool_allocator.destroy(ack.ptr);
+    //     }
+
+    //     if (nack.len > 3) {
+    //         self.tx_send.pushBack(self.gpa_allocator, nack) catch self.pool_allocator.destroy(nack.ptr);
+    //     } else {
+    //         self.pool_allocator.destroy(nack.ptr);
+    //     }
+    // }
 
     self.rx_datagram_window.clear();
 }

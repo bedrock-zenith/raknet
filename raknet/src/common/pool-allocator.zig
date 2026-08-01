@@ -14,7 +14,7 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
         backing_allocator: std.mem.Allocator,
         pool: Pool,
 
-        pub fn init(allocator: std.mem.Allocator) !@This() {
+        pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
             return .{
                 .backing_allocator = allocator,
                 .pool = (try Pool.initCapacity(allocator, 64)),
@@ -25,7 +25,7 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
             self.pool.deinit(self.backing_allocator);
         }
 
-        pub inline fn create(self: *@This(), comptime T: type) !*T {
+        pub inline fn create(self: *@This(), comptime T: type) std.mem.Allocator.Error!*T {
             if (@sizeOf(T) > POOL_SIZE)
                 @compileError("Object too large, T:" ++ @typeName(T));
             if (@alignOf(T) > @alignOf(usize))
@@ -35,7 +35,11 @@ pub fn PoolAllocator(comptime POOL_SIZE: comptime_int) type {
             return @ptrCast(@alignCast(ptr));
         }
 
-        pub inline fn alloc(self: *@This(), comptime T: type) !*[@divExact(POOL_SIZE, @sizeOf(T))]T {
+        pub inline fn rent(self: *@This()) std.mem.Allocator.Error!*[POOL_SIZE]u8 {
+            return try self.pool.create(self.backing_allocator);
+        }
+
+        pub inline fn alloc(self: *@This(), comptime T: type) std.mem.Allocator.Error!*[@divExact(POOL_SIZE, @sizeOf(T))]T {
             if (@sizeOf(T) > POOL_SIZE)
                 @compileError("Object too large, T:" ++ @typeName(T));
             if (@alignOf(T) > @alignOf(usize))
