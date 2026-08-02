@@ -683,10 +683,10 @@ pub fn txFlush(self: *Connection) Allocator.Error!bool {
 }
 
 /// Force send last packet before connection is destroyed
-pub fn txHarakiry(self: *Connection, data: []const u8) Allocator.Error!bool {
+pub fn txHarakiry(self: *Connection, data: []const u8) Allocator.Error!void {
     var datagram: raknet.datagram.DatagramMemory = .{
-        .buffer = data,
-        .offset = data.len,
+        .buffer = undefined,
+        .offset = 0,
         .segments_len = 1,
         .segments = undefined,
     };
@@ -696,10 +696,11 @@ pub fn txHarakiry(self: *Connection, data: []const u8) Allocator.Error!bool {
         .reliable_index = self.tx_reliable_index,
         .body = data,
         .fragment = null,
+        .channel = undefined,
     };
     self.tx_reliable_index +%= 1;
-    try txRawSend(self, &datagram, self.tx_datagram_window.head, false);
     self.state = .Harakiry;
+    _ = try txRawSend(self, &datagram, self.tx_datagram_window.head, false);
 }
 
 fn txRawSend(self: *Connection, datagram: *const raknet.datagram.DatagramMemory, datagram_index: u32, reliable_only: bool) Allocator.Error!bool {
