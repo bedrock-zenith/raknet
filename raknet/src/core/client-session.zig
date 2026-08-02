@@ -43,9 +43,16 @@ pub fn deinit(self: *ClientSession) void {
     self.connection.deinit();
 }
 
-pub fn receive(self: *ClientSession, datagram: []const u8) (Allocator.Error)!void {
-    // TODO: handle all possible errors except Allocator.Error
-    self.connection.receive(datagram) catch unreachable;
+pub fn receive(self: *ClientSession, datagram: []const u8) Allocator.Error!void {
+    self.connection.receive(datagram) catch |err| switch (err) {
+        Allocator.Error.OutOfMemory => return error.OutOfMemory,
+        // maybe we can recover so far
+        Connection.RxError.ChannelOutOfBounds, Connection.RxError.InvalidPacket => {},
+        // if we got these its better to disconnect this shi connection
+        Connection.RxError.Unrecoverable, Connection.RxError.FragmentBuilderOutOfMemory => {
+            try self.disconnect();
+        },
+    };
 
     while (self.connection.rx_received.popFront()) |segment| {
         try rxSingle(self, segment);
