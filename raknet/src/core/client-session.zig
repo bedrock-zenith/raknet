@@ -70,9 +70,18 @@ pub fn tick(self: *ClientSession, current_tick: usize) Allocator.Error!void {
 }
 
 pub fn txFlush(self: *ClientSession) std.Io.net.Socket.SendError!void {
+    if (self.connection.state == .Disconnected) {
+        @branchHint(.unlikely);
+        return;
+    }
+
     while (self.connection.tx_send.popFront()) |buffer| {
         try self.connection.endpoint.send(self.listener.io, buffer);
         self.connection.pool_allocator.destroy(buffer.ptr);
+    }
+
+    if (self.connection.state == .Harakiry) {
+        self.connection.state = .Disconnected;
     }
 }
 
@@ -128,7 +137,7 @@ fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) 
 }
 
 pub fn disconnect(self: *ClientSession) Allocator.Error!void {
-    // todo: send disconnect packet and force it through
+    try self.connection.txHarakiry(&.{@intFromEnum(raknet.PacketId.DisconnectionNotification)});
 
     try self.listener.server_events.pushBack(self.listener.allocator, .{
         .disconnected = .{ .session = self },

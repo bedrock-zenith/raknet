@@ -105,7 +105,6 @@ pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
             @import("connection.zig").destroySegment(&self.pool_allocator, self.pool_allocator.backing_allocator, @ptrCast(@alignCast(@constCast(message.context))));
         },
         .disconnected => |message| {
-            _ = self.sessions.remove(message.session.connection.endpoint.address);
             message.session.deinit();
         },
         .connected => {},
@@ -113,10 +112,28 @@ pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
 }
 
 pub fn tick(self: *Listener, current_tick: usize) Allocator.Error!void {
+    var sessions_to_remove: [16]*ClientSession = undefined;
+    var sessions_count: usize = 0;
     self.last_tick = current_tick;
     var iterator = self.sessions.valueIterator();
-    while (iterator.next()) |session| {
-        try session.*.tick(current_tick);
+    while (iterator.next()) |s| {
+        const session = s.*;
+        if (session.connection.state == .Disconnected) {
+            @branchHint(.unlikely);
+            if (sessions_count < sessions_to_remove.len) {
+                @branchHint(.likely);
+                sessions_to_remove[sessions_count] = session;
+                sessions_count += 1;
+            }
+            continue;
+        }
+        try session.tick(current_tick);
+    }
+
+    while (sessions_count > 0) {
+        @branchHint(.unlikely);
+        sessions_count -%= 1;
+        _ = self.sessions.remove(sessions_to_remove[sessions_count].connection.endpoint.address);
     }
 }
 
