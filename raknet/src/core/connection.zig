@@ -698,6 +698,7 @@ pub fn txHarakiry(self: *Connection, data: []const u8) Allocator.Error!void {
         .fragment = null,
         .channel = undefined,
     };
+
     self.tx_reliable_index +%= 1;
     self.state = .Harakiry;
     _ = try txRawSend(self, &datagram, self.tx_datagram_window.head, false);

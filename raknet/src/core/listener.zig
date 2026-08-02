@@ -105,6 +105,7 @@ pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
             @import("connection.zig").destroySegment(&self.pool_allocator, self.pool_allocator.backing_allocator, @ptrCast(@alignCast(@constCast(message.context))));
         },
         .disconnected => |message| {
+            // todo: we can't deinitialize if we are in harakiry state and the connection could still tick
             message.session.deinit();
         },
         .connected => {},
