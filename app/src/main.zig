@@ -134,9 +134,9 @@ pub fn main(init: std.process.Init) !void {
         if (current_time >= last_time_tick + TICK_DELTA_TIME) {
             last_time_tick = current_time;
             try listener.tick(@intCast(last_time_tick));
-
-            try listener.txFlush();
         }
+
+        try listener.txFlush();
     }
 }
 

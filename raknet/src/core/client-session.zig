@@ -12,10 +12,13 @@ const Endpoint = @import("endpoint.zig");
 const Listener = @import("listener.zig");
 
 const STALE_SESSION_TIMEOUT_TICKS = 10_000;
+const PING_TIME_TIMEOUT_TICKS = 5_000;
 
 const ClientSession = @This();
 connection: Connection,
 listener: *Listener,
+ping: usize,
+last_ping_time: usize,
 
 pub fn init(
     self: *ClientSession,
@@ -27,6 +30,8 @@ pub fn init(
     self.* = .{
         .listener = listener,
         .connection = undefined,
+        .last_ping_time = 0,
+        .ping = 0,
     };
     try self.connection.init(
         listener.io,
@@ -61,9 +66,13 @@ pub fn receive(self: *ClientSession, datagram: []const u8) Allocator.Error!void 
 
 pub fn tick(self: *ClientSession, current_tick: usize) Allocator.Error!void {
     if (current_tick > self.connection.rx_last_tick + STALE_SESSION_TIMEOUT_TICKS) {
-        logger.debug("stale session", .{});
         try disconnect(self);
         return;
+    }
+
+    if (current_tick > self.last_ping_time + PING_TIME_TIMEOUT_TICKS) {
+        self.last_ping_time = current_tick;
+        try sendPing(self);
     }
 
     try self.connection.tick(current_tick);
@@ -85,6 +94,12 @@ pub fn txFlush(self: *ClientSession) std.Io.net.Socket.SendError!void {
     }
 }
 
+fn sendPing(self: *ClientSession) Allocator.Error!void {
+    try sendInternal(self, raknet.online.ConnectedPing, &.{
+        .ping_time = @bitCast(std.Io.Clock.now(.awake, self.listener.io).toMilliseconds()),
+    });
+}
+
 fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.Error!void {
     if (segment.body.len == 0) {
         destroySegment(self.connection.pool_allocator, self.connection.gpa, segment);
@@ -92,7 +107,6 @@ fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.E
     }
 
     const packet_id: raknet.PacketId = @enumFromInt(segment.body[0]);
-    logger.info("packet_id: {}", .{packet_id});
 
     (switch (packet_id) {
         .ConnectionRequest => rxConnectionRequest(self, segment),
@@ -100,6 +114,7 @@ fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.E
         .ConnectedPing => rxConnectedPing(self, segment),
         .DisconnectionNotification => rxDisconnectionNotification(self, segment),
         .GameData => rxGameData(self, segment),
+        .ConnectedPong => rxConnectedPong(self, segment),
         _ => destroySegment(self.connection.pool_allocator, self.connection.gpa, segment),
         else => br: {
             destroySegment(self.connection.pool_allocator, self.connection.gpa, segment);
@@ -119,7 +134,7 @@ fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) 
 
     if (packet.client_guid != self.connection.guid) {
         try disconnect(self);
-        // todo: disconnect?
+        return;
     }
 
     try sendInternal(self, raknet.online.ConnectionRequestAccepted, &.{
@@ -138,10 +153,6 @@ fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) 
 
 pub fn disconnect(self: *ClientSession) Allocator.Error!void {
     try self.connection.txHarakiry(&.{@intFromEnum(raknet.PacketId.DisconnectionNotification)});
-
-    try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .disconnected = .{ .session = self },
-    });
 }
 
 fn rxNewIncomingConnection(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.Error!void {
@@ -162,17 +173,22 @@ fn rxConnectedPing(self: *ClientSession, segment: *raknet.datagram.Segment) (Con
 
     try sendInternal(self, raknet.online.ConnectedPong, &.{
         .ping_time = packet.ping_time,
-        .pong_time = @intCast(std.Io.Clock.now(.awake, self.connection.io).toMilliseconds()),
+        .pong_time = @bitCast(std.Io.Clock.now(.awake, self.connection.io).toMilliseconds()),
     });
+}
+
+fn rxConnectedPong(self: *ClientSession, segment: *raknet.datagram.Segment) void {
+    defer destroySegment(self.connection.pool_allocator, self.connection.gpa, segment);
+
+    var reader: Reader = .init(segment.body, 1);
+    const packet = readPacket(&reader, raknet.online.ConnectedPong) catch return;
+
+    self.ping = @intCast(@as(u64, @bitCast(std.Io.Clock.now(.awake, self.listener.io).toMilliseconds())) - packet.ping_time);
 }
 
 fn rxDisconnectionNotification(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.Error!void {
     defer destroySegment(self.connection.pool_allocator, self.connection.gpa, segment);
-
     self.connection.state = .Disconnected;
-    try self.listener.server_events.pushBack(self.listener.allocator, .{
-        .disconnected = .{ .session = self },
-    });
 }
 
 fn rxGameData(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.Error!void {

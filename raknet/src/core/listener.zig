@@ -86,6 +86,7 @@ pub fn deinit(self: *Listener) void {
 
 pub fn receive(self: *Listener, buffer: []const u8, endpoint: *const Endpoint, current_tick: usize) Allocator.Error!void {
     self.last_tick = current_tick; // autofix
+
     if (buffer.len == 0) return;
 
     const packetId = buffer[0];
@@ -105,8 +106,7 @@ pub fn returnEvent(self: *Listener, event: ListenerEvent) void {
             @import("connection.zig").destroySegment(&self.pool_allocator, self.pool_allocator.backing_allocator, @ptrCast(@alignCast(@constCast(message.context))));
         },
         .disconnected => |message| {
-            // todo: we can't deinitialize if we are in harakiry state and the connection could still tick
-            message.session.deinit();
+            destroySession(self, message.session);
         },
         .connected => {},
     }
@@ -135,6 +135,11 @@ pub fn tick(self: *Listener, current_tick: usize) Allocator.Error!void {
         @branchHint(.unlikely);
         sessions_count -%= 1;
         _ = self.sessions.remove(sessions_to_remove[sessions_count].connection.endpoint.address);
+        try self.server_events.pushBack(self.allocator, .{
+            .disconnected = .{
+                .session = sessions_to_remove[sessions_count],
+            },
+        });
     }
 }
 
@@ -164,13 +169,20 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) Alloc
         .OpenConnectionRequestTwo => rxOpenConnectionTwo(self, buffer, endpoint),
         .DisconnectionNotification => {
             if (self.sessions.getEntry(endpoint.address)) |entry| {
-                if (entry.value_ptr.*.*.connection.state == .Unconnected)
+                if (entry.value_ptr.*.*.connection.state == .Unconnected) {
                     self.sessions.removeByPtr(entry.key_ptr);
+                    destroySession(self, entry.value_ptr.*);
+                }
             }
         },
         _ => logger.err("Unknown packet, size: {d}, packet_id: {d}", .{ buffer.len, buffer[0] }),
         else => logger.err("Unsupported packet: {s}, size: {d}, packet_id: {d}", .{ @tagName(packet_id), buffer.len, buffer[0] }),
     };
+}
+
+inline fn destroySession(self: *const Listener, session: *ClientSession) void {
+    _ = self; // autofix
+    session.deinit();
 }
 
 fn rxUnconnectedPing(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) Allocator.Error!void {
@@ -265,7 +277,7 @@ inline fn sendOfflinePacket(self: *Listener, endpoint: *const Endpoint, comptime
 
     meta.writeAsserted(T, &writer, value) catch return;
 
-    try self.tx_send.pushBack(self.allocator, .{ .buffer = buffer, .endpoint = endpoint.* });
+    try self.tx_send.pushBack(self.allocator, .{ .buffer = writer.getProcessedBytes(), .endpoint = endpoint.* });
 }
 
 inline fn readPacket(buffer: []const u8, comptime T: type) !T {
