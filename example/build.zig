@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     // in this directory.
     const strip = b.option(bool, "strip", "Strips debug symbols from emitted executable");
 
-    const raknet = b.dependency("raknet", .{
+    const raknet = b.dependency("zenith_raknet", .{
         .target = target,
         .optimize = optimize,
     });
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
             // repeated because you are allowed to rename your imports, which
             // can be extremely useful in case of collisions (which can happen
             // importing modules from different packages).
-            .{ .name = "raknet", .module = raknet.module("raknet") }},
+            .{ .name = "zenith-raknet", .module = raknet.module("zenith-raknet") }},
         }),
     });
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 
-const raknet = @import("raknet");
+const raknet = @import("zenith-raknet");
 const Listener = raknet.core.Listener;
 const zio = @import("zio");
 
@@ -15,9 +15,6 @@ pub const std_options = std.Options{
 
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.smp_allocator;
-    // const rt = try zio.Runtime.init(gpa, .{});
-    // defer rt.deinit();
-    // const io = rt.io();
 
     const io = init.io;
 
@@ -61,20 +58,6 @@ pub fn main(init: std.process.Init) !void {
 
         try listener.receive(result.data, &endpoint, @intCast(last_time_tick));
 
-        // const result = socket.receiveTimeout(io, &receive_buffer, duration);
-
-        // if (result) |message| {
-        //     const endpoint: raknet.core.Endpoint = .{
-        //         .address = message.from,
-        //         .source = &socket,
-        //     };
-        //     listener.receive(message.data, &endpoint, @intCast(last_time_tick));
-        // } else |err| switch (err) {
-        //     error.Timeout => {},
-        //     else => return err,
-        // }
-        //
-
         while (listener.dequeueEvent()) |event| {
             defer listener.returnEvent(event);
             switch (event) {
@@ -109,8 +92,6 @@ pub fn main(init: std.process.Init) !void {
 
                         switch (packet_id) {
                             193 => {
-                                // Reply with own network setting packet to the network settings request packet
-                                // contains gameheader, size of payload, packet id in varint format and packet data
                                 try message.session.connection.send(&.{ 0xfe, 0x0c, 0x8f, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
                                 network_settings_send = true;
                             },
@@ -119,13 +100,6 @@ pub fn main(init: std.process.Init) !void {
 
                         reader.pointer = next_checkpoint;
                     }
-
-                    // 0020   84 03 00 00 60 00 70 01 00 00 01 00 00 00 fe 0c
-                    // 0030   8f 01 01 00 00 00 00 00 00 00 00 00
-                    //
-                    // 0020   80 02 00 00 60 00 70 02 00 00 00 00 00 00 fe 0c
-                    // 0030   8f 01 01 00 00 00 00 00 00 00 00 00
-
                 },
             }
         }
