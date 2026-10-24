@@ -3,12 +3,16 @@
 
 # Zenith Raknet
 
-Raknet Transport Layer for Zig 0.16.
+Raknet Transport Layer for Zig 0.16+
 
 </div>
 
-btw, focused on aggressive memory pooling and cache locality with flatten structures,
-if we said optimized or blazingly fast then it would sound like AI slop,
-but we did care about this project and we believe it might outperform official raknet implementation
+Focused on aggressive memory pooling and cache locality with flat structures.
+If we said optimized or blazingly fast then it would sound like AI slop,
+but we did care about this project and we believe it might outperform the vanilla raknet implementation
 
-> also check [DOCS.md](./docs.md) if you are interested more in reading the source
+## Warning
+
+This lib hasn't been tested in any server software yet
+
+> also check [convention.md](./convention.md) if you are interested in reading the source
