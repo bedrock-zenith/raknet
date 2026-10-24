@@ -4,19 +4,19 @@
 //   Copyright (C) 2026 Bedrock Zenith
 //   https://github.com/bedrock-zenith/raknet
 //  ============================================================================
-//  
+//
 //  This file is part of Zenith Raknet.
-//  
+//
 //  Zenith Raknet is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU Lesser General Public License as published by
 //  the Free Software Foundation, either version 3 of the License, or
 //  (at your option) any later version.
-//  
+//
 //  Zenith Raknet is distributed in the hope that it will be useful,
 //  but WITHOUT ANY WARRANTY; without even the implied warranty of
 //  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 //  GNU Lesser General Public License for more details.
-//  
+//
 //  You should have received a copy of the GNU Lesser General Public License
 //  along with Zenith Raknet. If not, see <https://www.gnu.org/licenses/>.
 
@@ -72,15 +72,16 @@ pub inline fn write(comptime T: type, cursor: *common.Writer, value: *const T) !
             else => {
                 if (sizeof(T)) |size| {
                     try cursor.assert(size);
-                    inline for (type_info.@"struct".fields) |field|
-                        write(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                    inline for (type_info.@"struct".field_types, type_info.@"struct".field_names) |the_type, name| {
+                        write(the_type, cursor, &@field(value, name)) catch unreachable;
+                    }
                 } else |_| {
-                    inline for (type_info.@"struct".fields) |field| {
-                        if (sizeof(field.type)) |size| {
+                    inline for (type_info.@"struct".field_types, type_info.@"struct".field_names) |the_type, name| {
+                        if (sizeof(the_type)) |size| {
                             try cursor.assert(size);
-                            write(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                            write(the_type, cursor, &@field(value, name)) catch unreachable;
                         } else |_| {
-                            try write(field.type, cursor, &@field(value, field.name));
+                            try write(the_type, cursor, &@field(value, name));
                         }
                     }
                 }
@@ -156,15 +157,16 @@ pub inline fn read(comptime T: type, cursor: *common.Reader, value: *T) !void {
             else => {
                 if (sizeof(T)) |size| {
                     try cursor.assert(size);
-                    inline for (type_info.@"struct".fields) |field|
-                        read(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                    inline for (type_info.@"struct".field_types, type_info.@"struct".field_names) |the_type, name| {
+                        read(the_type, cursor, &@field(value, name)) catch unreachable;
+                    }
                 } else |_| {
-                    inline for (type_info.@"struct".fields) |field| {
-                        if (sizeof(field.type)) |s| {
+                    inline for (type_info.@"struct".field_types, type_info.@"struct".field_names) |the_type, name| {
+                        if (sizeof(the_type)) |s| {
                             try cursor.assert(s);
-                            read(field.type, cursor, &@field(value, field.name)) catch unreachable;
+                            read(the_type, cursor, &@field(value, name)) catch unreachable;
                         } else |_| {
-                            try read(field.type, cursor, &@field(value, field.name));
+                            try read(the_type, cursor, &@field(value, name));
                         }
                     }
                 }
@@ -229,8 +231,8 @@ pub inline fn sizeof(comptime T: type) error{Unsupported}!usize {
             raknet.ZeroPadding => 0,
             else => {
                 comptime var size: usize = 0;
-                inline for (type_info.@"struct".fields) |field|
-                    size +%= try sizeof(field.type);
+                inline for (type_info.@"struct".field_types) |field|
+                    size +%= try sizeof(field);
 
                 return size;
             },

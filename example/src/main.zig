@@ -6,7 +6,7 @@ const raknet = @import("zenith-raknet");
 const Listener = raknet.core.Listener;
 const zio = @import("zio");
 
-// ZIO temporary until zig supports receiveTimeout
+//ZIO temporary until zig supports receiveTimeout
 pub const std_options = std.Options{
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .zio, .level = .err },
@@ -14,9 +14,15 @@ pub const std_options = std.Options{
 };
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = std.heap.smp_allocator;
+    //const gpa = std.heap.smp_allocator;
+
+    // const runtime: *zio.Runtime = try .init(init.gpa, .{});
+    // defer runtime.deinit();
+
+    // const io = runtime.io();
 
     const io = init.io;
+    const gpa = init.gpa;
 
     const bind_address: net.IpAddress = .{ .ip4 = try .parse("0.0.0.0", 19132) };
     const socket = try bind_address.bind(io, .{ .mode = .dgram });
@@ -50,13 +56,38 @@ pub fn main(init: std.process.Init) !void {
 
     var loop = true;
     while (loop) {
-        const result = try socket.receive(io, &receive_buffer);
-        const endpoint: raknet.core.Endpoint = .{
-            .address = result.from,
-            .source = &socket,
-        };
+        // const timeoutable = socket.receiveTimeout(
+        //     io,
+        //     &receive_buffer,
+        //     .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(10) } },
+        // ) catch |err| switch (err) {
+        //     error.Timeout => null,
+        //     else => return err,
+        // };
 
-        try listener.receive(result.data, &endpoint, @intCast(last_time_tick));
+        // if (timeoutable) |result| {
+        //     const endpoint: raknet.core.Endpoint = .{
+        //         .address = result.from,
+        //         .source = &socket,
+        //     };
+
+        //     try listener.receive(result.data, &endpoint, @intCast(last_time_tick));
+        // }
+
+        if (socket.receive(io, &receive_buffer)) |result| {
+            const endpoint: raknet.core.Endpoint = .{
+                .address = result.from,
+                .source = &socket,
+            };
+
+            try listener.receive(result.data, &endpoint, @intCast(last_time_tick));
+        } else |err| {
+            switch (err) {
+                // We can just silently continue, it just OS telling us the message we send last time wasn't handled on the other side
+                error.PortUnreachable => {},
+                else => |err_else| return err_else,
+            }
+        }
 
         while (listener.dequeueEvent()) |event| {
             defer listener.returnEvent(event);

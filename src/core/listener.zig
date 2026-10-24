@@ -4,19 +4,19 @@
 //   Copyright (C) 2026 Bedrock Zenith
 //   https://github.com/bedrock-zenith/raknet
 //  ============================================================================
-//  
+//
 //  This file is part of Zenith Raknet.
-//  
+//
 //  Zenith Raknet is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU Lesser General Public License as published by
 //  the Free Software Foundation, either version 3 of the License, or
 //  (at your option) any later version.
-//  
+//
 //  Zenith Raknet is distributed in the hope that it will be useful,
 //  but WITHOUT ANY WARRANTY; without even the implied warranty of
 //  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 //  GNU Lesser General Public License for more details.
-//  
+//
 //  You should have received a copy of the GNU Lesser General Public License
 //  along with Zenith Raknet. If not, see <https://www.gnu.org/licenses/>.
 
@@ -203,8 +203,8 @@ fn offline(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) Alloc
 }
 
 inline fn destroySession(self: *const Listener, session: *ClientSession) void {
-    _ = self; // autofix
     session.deinit();
+    self.allocator.destroy(session);
 }
 
 fn rxUnconnectedPing(self: *Listener, buffer: []const u8, endpoint: *const Endpoint) Allocator.Error!void {
@@ -295,7 +295,7 @@ inline fn sendOfflinePacket(self: *Listener, endpoint: *const Endpoint, comptime
     const buffer = try self.pool_allocator.rent();
     errdefer self.pool_allocator.destroy(buffer.ptr);
     var writer: Writer = .init(buffer, 0);
-    writer.writeByte(@intFromEnum(T.PacketId));
+    writer.writeByte(@backingInt(T.PacketId));
 
     meta.writeAsserted(T, &writer, value) catch return;
 

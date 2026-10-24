@@ -4,19 +4,19 @@
 //   Copyright (C) 2026 Bedrock Zenith
 //   https://github.com/bedrock-zenith/raknet
 //  ============================================================================
-//  
+//
 //  This file is part of Zenith Raknet.
-//  
+//
 //  Zenith Raknet is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU Lesser General Public License as published by
 //  the Free Software Foundation, either version 3 of the License, or
 //  (at your option) any later version.
-//  
+//
 //  Zenith Raknet is distributed in the hope that it will be useful,
 //  but WITHOUT ANY WARRANTY; without even the implied warranty of
 //  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 //  GNU Lesser General Public License for more details.
-//  
+//
 //  You should have received a copy of the GNU Lesser General Public License
 //  along with Zenith Raknet. If not, see <https://www.gnu.org/licenses/>.
 
@@ -128,7 +128,7 @@ fn rxSingle(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.E
         return;
     }
 
-    const packet_id: raknet.PacketId = @enumFromInt(segment.body[0]);
+    const packet_id: raknet.PacketId = @fromBackingInt(segment.body[0]);
 
     (switch (packet_id) {
         .ConnectionRequest => rxConnectionRequest(self, segment),
@@ -174,7 +174,7 @@ fn rxConnectionRequest(self: *ClientSession, segment: *raknet.datagram.Segment) 
 }
 
 pub fn disconnect(self: *ClientSession) Allocator.Error!void {
-    try self.connection.txHarakiry(&.{@intFromEnum(raknet.PacketId.DisconnectionNotification)});
+    try self.connection.txHarakiry(&.{@backingInt(raknet.PacketId.DisconnectionNotification)});
 }
 
 fn rxNewIncomingConnection(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator.Error!void {
@@ -226,7 +226,7 @@ fn rxGameData(self: *ClientSession, segment: *raknet.datagram.Segment) Allocator
 fn sendInternal(self: *ClientSession, comptime T: type, value: *const T) Allocator.Error!void {
     var writer_buffer: [1024]u8 = undefined;
     var writer: Writer = .init(&writer_buffer, 0);
-    writer.writeByte(@intFromEnum(T.PacketId));
+    writer.writeByte(@backingInt(T.PacketId));
 
     // this method is sendInternal so we can assert that there is no raknet packet bigger than our buffer
     binary.writeAsserted(T, &writer, value) catch unreachable;

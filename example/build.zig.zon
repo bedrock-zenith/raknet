@@ -34,8 +34,8 @@
     .dependencies = .{
         .zenith_raknet = .{ .path = "../" },
         .zio = .{
-            .url = "git+https://github.com/lalinsky/zio?ref=v0.16.0#fd16258e8fadec5aa74f13302efecd070593cb06",
-            .hash = "zio-0.16.0-xHbVVJQxIgAMdBlOCF65siVKJRVww9Z_ayfJanpk7VEK",
+            .url = "git+https://github.com/lalinsky/zio/#9b49086c72edbfbcef00acb557d6177bcaee1cb5",
+            .hash = "zio-0.19.0-xHbVVHNqLQCbtzv2oAZp_8CRYKcc76Om5t697j-vFskK",
         },
     },
     .paths = .{
